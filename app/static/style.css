@@ -186,6 +186,23 @@ body {
   background: #f8fbff;
 }
 
+.row-inactive td {
+  opacity: 0.55;
+}
+
+/* ── Link type badge ────────────────────────────────────────────────────── */
+.link-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 20px;
+}
+
+.link-wifi { background: #ede9fe; color: #5b21b6; }
+.link-eth  { background: #e0f2fe; color: #075985; }
+
 /* ── Device cell ────────────────────────────────────────────────────────── */
 .device-icon {
   width: 38px;
