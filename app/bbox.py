@@ -4,7 +4,7 @@ import requests
 
 
 class BboxClient:
-    def __init__(self, host: str, password: str):
+    def __init__(self, host: str, password: str) -> None:
         self.base_url = f"http://{host}/api/v1"
         self.password = password
         self.session = requests.Session()
@@ -19,7 +19,7 @@ class BboxClient:
         resp.raise_for_status()
         self._authenticated = True
 
-    def _get(self, path: str) -> dict:
+    def _get(self, path: str) -> list | dict:
         if not self._authenticated:
             self.login()
         resp = self.session.get(f"{self.base_url}{path}", timeout=5)
@@ -50,17 +50,10 @@ class BboxClient:
         return data[0].get("wireless", {}).get("acl", {}).get("rules", [])
 
     def block_mac(self, mac: str, hostname: str = "") -> None:
-        """Ajoute une règle de blocage par adresse MAC."""
         self._post(
             "/wireless/acl",
-            {
-                "mac": mac,
-                "enable": 1,
-                "type": "deny",
-                "hostname": hostname,
-            },
+            {"mac": mac, "enable": 1, "type": "deny", "hostname": hostname},
         )
 
     def unblock_mac(self, rule_id: int) -> None:
-        """Supprime une règle de blocage."""
         self._delete(f"/wireless/acl/{rule_id}")
