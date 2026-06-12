@@ -113,24 +113,39 @@ function renderLiveTable() {
 function deviceRow(d) {
   const rule = aclRules.find(r => r.mac === d.mac);
 
-  const statusBadge = d.is_blocked
-    ? `<span class="badge bg-danger-subtle text-danger">Bloqué</span>`
-    : `<span class="badge bg-success-subtle text-success">Connecté</span>`;
+  // Statut de connexion
+  let statusBadge;
+  if (d.is_blocked) {
+    statusBadge = `<span class="badge bg-danger-subtle text-danger">Bloqué</span>`;
+  } else if (d.active) {
+    statusBadge = `<span class="badge bg-success-subtle text-success">Connecté</span>`;
+  } else {
+    statusBadge = `<span class="badge bg-secondary-subtle text-secondary">Hors ligne</span>`;
+  }
 
-  const actionBtn = d.is_blocked
-    ? `<button class="btn-unblock" onclick="unblockDevice('${esc(d.mac)}', ${rule?.rule_id ?? 0})">
-         <i class="bi bi-check-circle me-1"></i>Débloquer
-       </button>`
-    : `<button class="btn-block" onclick="blockDevice('${esc(d.mac)}', '${esc(d.hostname)}')">
-         <i class="bi bi-slash-circle me-1"></i>Bloquer
-       </button>`;
+  // Bouton action (blocage uniquement pour WiFi)
+  let actionBtn = '';
+  if (d.is_wifi) {
+    actionBtn = d.is_blocked
+      ? `<button class="btn-unblock" onclick="unblockDevice('${esc(d.mac)}', ${rule?.rule_id ?? 0})">
+           <i class="bi bi-check-circle me-1"></i>Débloquer
+         </button>`
+      : `<button class="btn-block" onclick="blockDevice('${esc(d.mac)}', '${esc(d.hostname)}')">
+           <i class="bi bi-slash-circle me-1"></i>Bloquer
+         </button>`;
+  }
+
+  // Connexion type
+  const linkBadge = d.is_wifi
+    ? `<span class="link-badge link-wifi"><i class="bi bi-wifi me-1"></i>${escHtml(d.link)}</span>`
+    : `<span class="link-badge link-eth"><i class="bi bi-ethernet me-1"></i>${escHtml(d.link || 'Ethernet')}</span>`;
 
   return `
-    <tr>
+    <tr class="${d.active ? '' : 'row-inactive'}">
       <td>
         <div class="d-flex align-items-center gap-2">
           <div class="device-icon">
-            <i class="bi ${deviceIcon(d.hostname)} text-muted"></i>
+            <i class="bi ${deviceIcon(d.hostname, d.is_wifi)} text-muted"></i>
           </div>
           <div>
             <div class="device-name">${escHtml(d.hostname)}</div>
@@ -142,7 +157,8 @@ function deviceRow(d) {
       <td><code>${d.mac || '—'}</code></td>
       <td class="text-muted small">${fmtDate(d.first_seen)}</td>
       <td class="text-muted small">${fmtDate(d.last_seen)}</td>
-      <td>${rssiBadge(d.rssi)}</td>
+      <td>${linkBadge}</td>
+      <td>${d.is_wifi ? rssiBadge(d.rssi) : '<span class="text-muted">—</span>'}</td>
       <td>${statusBadge}</td>
       <td>${actionBtn}</td>
     </tr>`;
@@ -259,21 +275,29 @@ function rssiBadge(rssi) {
   return `<span class="rssi-badge ${cls}"><i class="bi ${icon}"></i> ${rssi} dBm</span>`;
 }
 
-function deviceIcon(name = '') {
+function deviceIcon(name = '', isWifi = false) {
   const n = name.toLowerCase();
-  if (n.includes('iphone') || n.includes('android') || n.includes('phone') || n.includes('samsung') || n.includes('pixel'))
+  if (n.includes('iphone') || n.includes('android') || n.includes('phone') || n.includes('samsung') || n.includes('pixel') || n.includes('redmi') || n.includes('xiaomi') || n.includes('huawei') || n.includes('oppo'))
     return 'bi-phone';
   if (n.includes('ipad') || n.includes('tablet'))
     return 'bi-tablet';
-  if (n.includes('mac') || n.includes('macbook') || n.includes('laptop') || n.includes('pc'))
+  if (n.includes('macbook') || n.includes('laptop') || n.includes('notebook'))
     return 'bi-laptop';
-  if (n.includes('tv') || n.includes('chromecast') || n.includes('firestick') || n.includes('shield'))
+  if (n.includes('mac') && !n.includes('mac address'))
+    return 'bi-display';
+  if (n.includes('desktop') || n.includes('pc') || n.includes('workstation'))
+    return 'bi-pc-display';
+  if (n.includes('tv') || n.includes('chromecast') || n.includes('firestick') || n.includes('shield') || n.includes('bbox-tv'))
     return 'bi-tv';
-  if (n.includes('xbox') || n.includes('ps') || n.includes('playstation') || n.includes('nintendo'))
+  if (n.includes('xbox') || n.includes('playstation') || n.includes('nintendo') || n.includes('ps4') || n.includes('ps5'))
     return 'bi-controller';
   if (n.includes('print'))
     return 'bi-printer';
-  return 'bi-device-hdd';
+  if (n.includes('nas') || n.includes('synology') || n.includes('qnap'))
+    return 'bi-hdd-network';
+  if (n.includes('bbox'))
+    return 'bi-router';
+  return isWifi ? 'bi-wifi' : 'bi-hdd-rack';
 }
 
 /* ── Utils ──────────────────────────────────────────────────────────────── */

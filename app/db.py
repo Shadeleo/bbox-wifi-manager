@@ -28,21 +28,32 @@ def init_db() -> None:
         """)
 
 
-def upsert_device(mac: str, hostname: str, ip: str) -> None:
+def upsert_device(
+    mac: str,
+    hostname: str,
+    ip: str,
+    first_seen: str | None = None,
+    last_seen: str | None = None,
+) -> None:
     now = datetime.now().isoformat(sep=" ", timespec="seconds")
+    fs = first_seen or now
+    ls = last_seen or now
     with _connect() as conn:
         exists = conn.execute(
-            "SELECT 1 FROM devices WHERE mac = ?", (mac,)
+            "SELECT first_seen FROM devices WHERE mac = ?", (mac,)
         ).fetchone()
         if exists:
+            # Conserve la date de première connexion la plus ancienne
+            stored_fs = exists["first_seen"]
+            final_fs = stored_fs if stored_fs < fs else fs
             conn.execute(
-                "UPDATE devices SET hostname = ?, ip = ?, last_seen = ? WHERE mac = ?",
-                (hostname, ip, now, mac),
+                "UPDATE devices SET hostname = ?, ip = ?, first_seen = ?, last_seen = ? WHERE mac = ?",
+                (hostname, ip, final_fs, ls, mac),
             )
         else:
             conn.execute(
                 "INSERT INTO devices (mac, hostname, ip, first_seen, last_seen) VALUES (?,?,?,?,?)",
-                (mac, hostname, ip, now, now),
+                (mac, hostname, ip, fs, ls),
             )
 
 
