@@ -427,14 +427,14 @@ code {
 
 .graph-wrap {
   position: relative;
-  background: #0f172a;
   border-radius: 0 0 var(--radius) var(--radius);
   overflow: hidden;
 }
 
 #graph-3d {
-  width: 100%;
   display: block;
+  width: 100%;
+  background: #060d1a;
 }
 
 /* ── Device side panel ──────────────────────────────────────────────────── */

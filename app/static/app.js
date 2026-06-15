@@ -4,7 +4,7 @@
 let liveDevices    = [];
 let historyDevices = [];
 let historyLoaded  = false;
-let graph3D        = null;
+let graph2D        = null;
 
 /* ── Bootstrap ──────────────────────────────────────────────────────────── */
 document.addEventListener('DOMContentLoaded', () => {
@@ -15,7 +15,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   document.getElementById('tab-3d-btn').addEventListener('shown.bs.tab', () => {
-    if (liveDevices.length) initGraph3D();
+    if (liveDevices.length) initGraph2D();
   });
 });
 
@@ -30,7 +30,7 @@ async function loadDevices() {
     updateStats(data);
     updateRefreshTime();
     setBboxStatus(true);
-    if (graph3D) initGraph3D();
+    if (graph2D) initGraph2D();
   } catch (e) {
     console.error('[loadDevices]', e);
     setLiveState('error', e.message);
@@ -122,63 +122,282 @@ function refreshAll() {
   if (histActive) loadHistory();
 }
 
-/* ── 3D Graph ───────────────────────────────────────────────────────────── */
+/* ── Network Graph — pure canvas 2D, zero external dependency ────────────── */
 
-function initGraph3D() {
+const NODE_COLOR   = { router: '#60a5fa', active: '#4ade80', blocked: '#f87171', inactive: '#475569' };
+const DEVICE_EMOJI = {
+  router: '📡', phone: '📱', tablet: '📱', laptop: '💻',
+  display: '🖥', tv: '📺', controller: '🎮', printer: '🖨',
+  'hdd-network': '💾', wifi: '📶',
+};
+
+function getNodeIconName(node) {
+  if (node.group === 'router') return 'router';
+  const n = String(node.hostname || '').toLowerCase();
+  if (/iphone|android|phone|samsung|pixel|redmi|xiaomi|huawei|oppo/.test(n)) return 'phone';
+  if (/ipad|tablet/.test(n))     return 'tablet';
+  if (/macbook|laptop|notebook/.test(n)) return 'laptop';
+  if (/mac|desktop|pc|workstation/.test(n)) return 'display';
+  if (/\btv\b|chromecast|firestick|shield|appletv/.test(n)) return 'tv';
+  if (/xbox|playstation|nintendo|ps4|ps5/.test(n)) return 'controller';
+  if (/print/.test(n)) return 'printer';
+  if (/nas|synology|qnap/.test(n)) return 'hdd-network';
+  return 'wifi';
+}
+
+function hexToRgb(hex) {
+  return [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)];
+}
+function lighten(hex, amt) {
+  const [r,g,b] = hexToRgb(hex);
+  return `rgb(${Math.min(255,r+amt)},${Math.min(255,g+amt)},${Math.min(255,b+amt)})`;
+}
+
+/* ── Graph state ── */
+let gCanvas    = null;   // HTMLCanvasElement
+let gCtx       = null;   // CanvasRenderingContext2D
+let gNodes     = [];
+let gLinks     = [];
+let gParticles = [];
+let gStars     = [];
+let gHover     = null;
+let gAnimId    = null;
+let gTooltip   = null;
+
+function nodeR(node) { return node.group === 'router' ? 30 : 20; }
+
+/* ── Layout: router in centre, devices in a circle ── */
+function buildLayout() {
+  const W = gCanvas.width, H = gCanvas.height;
+  const cx = W / 2, cy = H / 2;
+  const count = liveDevices.length || 1;
+  const radius = Math.min(W, H) * 0.34;
+
+  gNodes = [{ id: '__bbox__', hostname: 'Bbox', group: 'router', x: cx, y: cy }];
+  gLinks = [];
+
+  liveDevices.forEach((d, i) => {
+    const angle = (i / count) * Math.PI * 2 - Math.PI / 2;
+    gNodes.push({
+      ...d,
+      id:    d.mac,
+      group: d.is_blocked ? 'blocked' : d.active ? 'active' : 'inactive',
+      x: cx + Math.cos(angle) * radius,
+      y: cy + Math.sin(angle) * radius,
+    });
+    gLinks.push({ src: '__bbox__', tgt: d.mac, alive: !!d.active });
+  });
+
+  // Animate particles along active links
+  gParticles = [];
+  gLinks.filter(l => l.alive).forEach(l => {
+    for (let i = 0; i < 4; i++) {
+      gParticles.push({ l, t: Math.random() });
+    }
+  });
+}
+
+function nodeById(id) { return gNodes.find(n => n.id === id); }
+
+/* ── Drawing ── */
+function drawFrame() {
+  const ctx = gCtx, W = gCanvas.width, H = gCanvas.height;
+
+  // Background
+  ctx.fillStyle = '#060d1a';
+  ctx.fillRect(0, 0, W, H);
+
+  // Stars
+  gStars.forEach(s => {
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,255,255,${s.a})`; ctx.fill();
+  });
+
+  // Links
+  gLinks.forEach(l => {
+    const s = nodeById(l.src), t = nodeById(l.tgt);
+    if (!s || !t) return;
+    ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(t.x, t.y);
+    ctx.strokeStyle = l.alive ? 'rgba(74,222,128,0.35)' : 'rgba(148,163,184,0.1)';
+    ctx.lineWidth   = l.alive ? 1.5 : 0.8;
+    ctx.stroke();
+  });
+
+  // Particles along active links
+  gParticles.forEach(p => {
+    p.t = (p.t + 0.005) % 1;
+    const s = nodeById(p.l.src), t = nodeById(p.l.tgt);
+    if (!s || !t) return;
+    const x = s.x + (t.x - s.x) * p.t;
+    const y = s.y + (t.y - s.y) * p.t;
+    // Glow
+    const g = ctx.createRadialGradient(x, y, 0, x, y, 8);
+    g.addColorStop(0, 'rgba(74,222,128,0.9)');
+    g.addColorStop(1, 'rgba(74,222,128,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(x, y, 8, 0, Math.PI * 2); ctx.fill();
+    // Core dot
+    ctx.fillStyle = '#4ade80';
+    ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
+  });
+
+  // Nodes
+  gNodes.forEach(node => drawNode(ctx, node, node === gHover));
+
+  gAnimId = requestAnimationFrame(drawFrame);
+}
+
+function drawNode(ctx, node, hover) {
+  const R        = nodeR(node);
+  const isRouter = node.group === 'router';
+  const color    = NODE_COLOR[node.group] || NODE_COLOR.inactive;
+  const [cr,cg,cb] = hexToRgb(color);
+  const {x, y}   = node;
+
+  // Glow (always on router, on hover for others)
+  if (isRouter || hover) {
+    const g = ctx.createRadialGradient(x, y, R * 0.4, x, y, R * 2.8);
+    g.addColorStop(0, `rgba(${cr},${cg},${cb},${isRouter ? 0.6 : 0.45})`);
+    g.addColorStop(1, `rgba(${cr},${cg},${cb},0)`);
+    ctx.beginPath(); ctx.arc(x, y, R * 2.8, 0, Math.PI * 2);
+    ctx.fillStyle = g; ctx.fill();
+  }
+
+  // Core — radial gradient for 3-D shading
+  const grad = ctx.createRadialGradient(x - R * 0.35, y - R * 0.35, 2, x, y, R);
+  grad.addColorStop(0, lighten(color, 90));
+  grad.addColorStop(1, color);
+  ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2);
+  ctx.fillStyle = grad; ctx.fill();
+
+  // White border
+  ctx.strokeStyle = `rgba(255,255,255,${isRouter ? 0.8 : 0.45})`;
+  ctx.lineWidth   = isRouter ? 2.5 : 1.5;
+  ctx.stroke();
+
+  // Router dashed outer ring
+  if (isRouter) {
+    ctx.beginPath(); ctx.arc(x, y, R + 8, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(${cr},${cg},${cb},0.55)`;
+    ctx.lineWidth   = 2;
+    ctx.setLineDash([5, 5]); ctx.stroke(); ctx.setLineDash([]);
+  }
+
+  // Emoji
+  const emoji = DEVICE_EMOJI[getNodeIconName(node)] || '📶';
+  ctx.font         = `${Math.round(R * (isRouter ? 1.05 : 0.95))}px serif`;
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(emoji, x, y);
+
+  // Label below node
+  const label = (node.hostname || '').length > 15
+    ? node.hostname.slice(0, 15) + '…' : (node.hostname || '');
+  if (label) {
+    ctx.font         = 'bold 12px "Segoe UI", system-ui, sans-serif';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle    = '#e2e8f0';
+    ctx.shadowColor  = '#060d1a'; ctx.shadowBlur = 6;
+    ctx.fillText(label, x, y + R + 6);
+    ctx.shadowBlur   = 0;
+  }
+}
+
+/* ── Hit-test ── */
+function nodeAt(px, py) {
+  // Reverse order so top nodes get priority
+  for (let i = gNodes.length - 1; i >= 0; i--) {
+    const n = gNodes[i];
+    const R = nodeR(n), dx = n.x - px, dy = n.y - py;
+    if (dx * dx + dy * dy <= R * R) return n;
+  }
+  return null;
+}
+
+/* ── Tooltip ── */
+function showTooltip(node, canvasX, canvasY) {
+  if (!gTooltip) {
+    gTooltip = document.createElement('div');
+    gTooltip.style.cssText = [
+      'position:absolute', 'pointer-events:none', 'z-index:99',
+      'background:rgba(6,13,26,.92)', 'color:#f1f5f9',
+      'padding:7px 13px', 'border-radius:9px',
+      'font:13px/1.4 system-ui,sans-serif',
+      'border:1px solid rgba(255,255,255,.1)',
+      'white-space:nowrap',
+    ].join(';');
+    document.getElementById('graph-3d').parentElement.appendChild(gTooltip);
+  }
+  gTooltip.innerHTML = `<b>${escHtml(node.hostname || '')}</b><br>
+    <span style="color:#94a3b8;font-size:11px">${escHtml(node.ip || node.mac || '')}</span>`;
+  gTooltip.style.left    = (canvasX + 14) + 'px';
+  gTooltip.style.top     = (canvasY - 10) + 'px';
+  gTooltip.style.display = 'block';
+}
+function hideTooltip() {
+  if (gTooltip) gTooltip.style.display = 'none';
+}
+
+/* ── Events ── */
+function handleGraphClick(e) {
+  const r    = gCanvas.getBoundingClientRect();
+  const node = nodeAt(e.clientX - r.left, e.clientY - r.top);
+  if (node && node.group !== 'router') showDevicePanel(node);
+  else closePanel();
+}
+function handleGraphMove(e) {
+  const r    = gCanvas.getBoundingClientRect();
+  const node = nodeAt(e.clientX - r.left, e.clientY - r.top);
+  gHover     = node || null;
+  gCanvas.style.cursor = (node && node.group !== 'router') ? 'pointer' : 'default';
+  if (node && node.group !== 'router') showTooltip(node, e.clientX - r.left, e.clientY - r.top);
+  else hideTooltip();
+}
+
+/* ── Init / refresh ── */
+function initGraph2D() {
   const container = document.getElementById('graph-3d');
   if (!container) return;
 
-  const h = Math.max(520, window.innerHeight - 210);
-  container.style.height = h + 'px';
+  const W = Math.max(400, container.offsetWidth
+            || container.closest('.tab-pane')?.offsetWidth
+            || document.querySelector('.panel-card')?.offsetWidth
+            || 900);
+  const H = Math.max(540, window.innerHeight - 210);
 
-  const nodes = [{ id: '__bbox__', label: 'Bbox', group: 'router' }];
-  const links = [];
+  if (gAnimId) { cancelAnimationFrame(gAnimId); gAnimId = null; }
 
-  for (const d of liveDevices) {
-    nodes.push({
-      id:         d.mac,
-      label:      d.hostname,
-      group:      d.is_blocked ? 'blocked' : d.active ? 'active' : 'inactive',
-      ...d,
-    });
-    links.push({ source: '__bbox__', target: d.mac, alive: !!d.active });
-  }
+  // Create canvas fresh every time data changes
+  container.innerHTML = '';
+  gCanvas = document.createElement('canvas');
+  gCanvas.width  = W;
+  gCanvas.height = H;
+  gCanvas.style.cssText = 'display:block;width:100%;height:100%';
+  container.style.height = H + 'px';
+  container.appendChild(gCanvas);
+  gCtx = gCanvas.getContext('2d');
 
-  const gData = { nodes, links };
+  // Stars (random but stable for this session)
+  gStars = Array.from({ length: 220 }, () => ({
+    x: Math.random() * W,
+    y: Math.random() * H,
+    r: Math.random() * 1.3 + 0.2,
+    a: Math.random() * 0.55 + 0.1,
+  }));
 
-  if (graph3D) {
-    graph3D.graphData(gData);
-    return;
-  }
+  buildLayout();
 
-  graph3D = ForceGraph3D()(container)
-    .width(container.offsetWidth)
-    .height(h)
-    .backgroundColor('#0f172a')
-    .graphData(gData)
-    .nodeLabel(n => `<span style="background:rgba(15,23,42,.9);color:#f1f5f9;padding:5px 10px;border-radius:8px;font-size:12px;font-family:system-ui">${escHtml(n.label || n.hostname || '')}</span>`)
-    .nodeColor(n => {
-      if (n.group === 'router')   return '#3b82f6';
-      if (n.group === 'blocked')  return '#ef4444';
-      if (n.group === 'active')   return '#22c55e';
-      return '#475569';
-    })
-    .nodeVal(n => n.group === 'router' ? 24 : 6)
-    .nodeOpacity(0.92)
-    .linkColor(l => l.alive ? 'rgba(34,197,94,0.5)' : 'rgba(148,163,184,0.2)')
-    .linkWidth(l => l.alive ? 1.5 : 0.8)
-    .linkDirectionalParticles(l => l.alive ? 4 : 0)
-    .linkDirectionalParticleSpeed(0.005)
-    .linkDirectionalParticleWidth(1.5)
-    .linkDirectionalParticleColor(() => '#4ade80')
-    .onNodeClick(node => {
-      if (node.group === 'router') return;
-      showDevicePanel(node);
-    })
-    .onBackgroundClick(closePanel);
+  gCanvas.addEventListener('click',     handleGraphClick);
+  gCanvas.addEventListener('mousemove', handleGraphMove);
+  gCanvas.addEventListener('mouseleave', () => { gHover = null; hideTooltip(); });
+
+  drawFrame();
 
   window.addEventListener('resize', () => {
-    if (graph3D) graph3D.width(container.offsetWidth);
+    if (!gCanvas) return;
+    const nw = container.offsetWidth || W;
+    gCanvas.width = nw;
+    buildLayout();
   });
 }
 
@@ -214,7 +433,6 @@ function showDevicePanel(node) {
       <i class="bi bi-slash-circle me-1"></i>Bloquer</button>`;
   }
   document.getElementById('panel-actions').innerHTML = actions;
-
   document.getElementById('device-panel').classList.add('panel-open');
 }
 
