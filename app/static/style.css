@@ -264,6 +264,18 @@ code {
 }
 
 /* ── Action buttons ─────────────────────────────────────────────────────── */
+.btn-disconnect {
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 7px;
+  border: 1.5px solid #fbbf24;
+  color: #d97706;
+  background: transparent;
+  transition: all 0.15s;
+}
+.btn-disconnect:hover { background: #fef3c7; border-color: #d97706; color: #d97706; }
+
 .btn-block {
   font-size: 0.78rem;
   font-weight: 600;
@@ -287,6 +299,18 @@ code {
   transition: all 0.15s;
 }
 .btn-unblock:hover { background: #dcfce7; border-color: #16a34a; color: #16a34a; }
+
+.btn-kick-block {
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 7px;
+  border: 1.5px solid #c4b5fd;
+  color: #7c3aed;
+  background: transparent;
+  transition: all 0.15s;
+}
+.btn-kick-block:hover { background: #ede9fe; border-color: #7c3aed; color: #7c3aed; }
 
 /* ── Loading state ──────────────────────────────────────────────────────── */
 .loading-state {

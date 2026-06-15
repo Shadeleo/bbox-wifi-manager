@@ -1,8 +1,12 @@
+import logging
 import os
 import webbrowser
 import threading
 
 from dotenv import load_dotenv
+
+logging.basicConfig(level=logging.DEBUG, format="%(name)s %(levelname)s %(message)s")
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 load_dotenv()
 

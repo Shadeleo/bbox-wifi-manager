@@ -21,14 +21,14 @@ async function loadDevices() {
   setLiveState('loading');
   try {
     const data = await apiFetch('/api/devices');
-    liveDevices = data.devices  ?? [];
-    aclRules    = data.acl      ?? [];
+    liveDevices = data.devices ?? [];
 
     renderLiveTable();
     updateStats(data);
     updateRefreshTime();
     setBboxStatus(true);
   } catch (e) {
+    console.error('[loadDevices]', e);
     setLiveState('error', e.message);
     setBboxStatus(false);
   }
@@ -50,8 +50,22 @@ async function loadHistory() {
   }
 }
 
+async function disconnectDevice(mac, hostname) {
+  if (!confirm(`Déconnecter "${hostname}" (${mac}) ?\n\nL'appareil sera expulsé temporairement — il pourra se reconnecter.`)) return;
+  try {
+    await apiFetch('/api/disconnect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mac, hostname }),
+    });
+    await reloadAll();
+  } catch (e) {
+    alert(`Impossible de déconnecter l'appareil :\n${e.message}`);
+  }
+}
+
 async function blockDevice(mac, hostname) {
-  if (!confirm(`Bloquer "${hostname}" (${mac}) ?\n\nL'appareil sera expulsé du réseau WiFi.`)) return;
+  if (!confirm(`Bloquer définitivement "${hostname}" (${mac}) ?\n\nL'appareil ne pourra plus accéder à Internet.`)) return;
   try {
     await apiFetch('/api/block', {
       method: 'POST',
@@ -64,10 +78,24 @@ async function blockDevice(mac, hostname) {
   }
 }
 
-async function unblockDevice(mac, ruleId) {
-  if (!confirm(`Débloquer ${mac} ?\n\nL'appareil pourra se reconnecter au WiFi.`)) return;
+async function kickAndBlock(mac, hostname) {
+  if (!confirm(`Expulser ET bloquer "${hostname}" (${mac}) ?\n\nL'appareil sera immédiatement déconnecté et ne pourra plus accéder à Internet.`)) return;
   try {
-    await apiFetch(`/api/block/${ruleId}?mac=${encodeURIComponent(mac)}`, { method: 'DELETE' });
+    await apiFetch('/api/kick-and-block', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mac, hostname }),
+    });
+    await reloadAll();
+  } catch (e) {
+    alert(`Impossible d'expulser/bloquer l'appareil :\n${e.message}`);
+  }
+}
+
+async function unblockDevice(mac) {
+  if (!confirm(`Débloquer ${mac} ?\n\nL'appareil pourra se reconnecter au réseau.`)) return;
+  try {
+    await apiFetch(`/api/block?mac=${encodeURIComponent(mac)}`, { method: 'DELETE' });
     await reloadAll();
   } catch (e) {
     alert(`Impossible de débloquer l'appareil :\n${e.message}`);
@@ -105,14 +133,21 @@ function renderLiveTable() {
         </td>
       </tr>`;
   } else {
-    tbody.innerHTML = liveDevices.map(deviceRow).join('');
+    const rows = [];
+    for (const d of liveDevices) {
+      try {
+        rows.push(deviceRow(d));
+      } catch (err) {
+        console.error('[deviceRow] device:', d, 'error:', err);
+        rows.push(`<tr><td colspan="9" class="text-danger small">Erreur sur ${escHtml(String(d?.hostname ?? d?.mac ?? '?'))}</td></tr>`);
+      }
+    }
+    tbody.innerHTML = rows.join('');
   }
   setLiveState('table');
 }
 
 function deviceRow(d) {
-  const rule = aclRules.find(r => r.mac === d.mac);
-
   // Statut de connexion
   let statusBadge;
   if (d.is_blocked) {
@@ -123,16 +158,32 @@ function deviceRow(d) {
     statusBadge = `<span class="badge bg-secondary-subtle text-secondary">Hors ligne</span>`;
   }
 
-  // Bouton action (blocage uniquement pour WiFi)
+  // Boutons action (bloquer/débloquer pour tous, kick uniquement WiFi actif)
   let actionBtn = '';
-  if (d.is_wifi) {
-    actionBtn = d.is_blocked
-      ? `<button class="btn-unblock" onclick="unblockDevice('${esc(d.mac)}', ${rule?.rule_id ?? 0})">
-           <i class="bi bi-check-circle me-1"></i>Débloquer
+  if (d.is_blocked) {
+    actionBtn = `
+      <button class="btn-unblock" onclick="unblockDevice('${esc(d.mac)}')">
+        <i class="bi bi-check-circle me-1"></i>Débloquer
+      </button>`;
+  } else {
+    const kickBtn = (d.is_wifi && d.active)
+      ? `<button class="btn-disconnect" onclick="disconnectDevice('${esc(d.mac)}', '${esc(d.hostname)}')">
+           <i class="bi bi-wifi-off me-1"></i>Déconnecter
          </button>`
-      : `<button class="btn-block" onclick="blockDevice('${esc(d.mac)}', '${esc(d.hostname)}')">
-           <i class="bi bi-slash-circle me-1"></i>Bloquer
-         </button>`;
+      : '';
+    const kickBlockBtn = (d.is_wifi && d.active)
+      ? `<button class="btn-kick-block" onclick="kickAndBlock('${esc(d.mac)}', '${esc(d.hostname)}')">
+           <i class="bi bi-x-octagon me-1"></i>Kick & Bloquer
+         </button>`
+      : '';
+    actionBtn = `
+      <div class="d-flex gap-1 flex-wrap">
+        ${kickBtn}
+        ${kickBlockBtn}
+        <button class="btn-block" onclick="blockDevice('${esc(d.mac)}', '${esc(d.hostname)}')">
+          <i class="bi bi-slash-circle me-1"></i>Bloquer
+        </button>
+      </div>`;
   }
 
   // Connexion type
@@ -171,7 +222,7 @@ function renderHistoryTable(devices) {
   if (devices.length === 0) {
     tbody.innerHTML = `
       <tr>
-        <td colspan="6">
+        <td colspan="7">
           <div class="empty-state">
             <i class="bi bi-clock-history"></i>
             Aucun historique disponible
@@ -189,6 +240,14 @@ function renderHistoryTable(devices) {
         ? `<span class="badge bg-success-subtle text-success">En ligne</span>`
         : `<span class="badge bg-secondary-subtle text-secondary">Hors ligne</span>`;
 
+    const actionBtn = d.is_blocked
+      ? `<button class="btn-unblock" onclick="unblockDevice('${esc(d.mac)}')">
+           <i class="bi bi-check-circle me-1"></i>Débloquer
+         </button>`
+      : `<button class="btn-block" onclick="blockDevice('${esc(d.mac)}', '${esc(d.hostname || d.mac)}')">
+           <i class="bi bi-slash-circle me-1"></i>Bloquer
+         </button>`;
+
     return `
       <tr>
         <td>
@@ -204,6 +263,7 @@ function renderHistoryTable(devices) {
         <td class="text-muted small">${fmtDate(d.first_seen)}</td>
         <td class="text-muted small">${fmtDate(d.last_seen)}</td>
         <td>${status}</td>
+        <td>${actionBtn}</td>
       </tr>`;
   }).join('');
 }
@@ -212,9 +272,9 @@ function filterHistory() {
   const q = document.getElementById('history-search').value.toLowerCase();
   const filtered = q
     ? historyDevices.filter(d =>
-        (d.hostname || '').toLowerCase().includes(q) ||
-        (d.mac      || '').toLowerCase().includes(q) ||
-        (d.ip       || '').toLowerCase().includes(q)
+        String(d.hostname || '').toLowerCase().includes(q) ||
+        String(d.mac      || '').toLowerCase().includes(q) ||
+        String(d.ip       || '').toLowerCase().includes(q)
       )
     : historyDevices;
   renderHistoryTable(filtered);
@@ -276,7 +336,7 @@ function rssiBadge(rssi) {
 }
 
 function deviceIcon(name = '', isWifi = false) {
-  const n = name.toLowerCase();
+  const n = String(name ?? '').toLowerCase();
   if (n.includes('iphone') || n.includes('android') || n.includes('phone') || n.includes('samsung') || n.includes('pixel') || n.includes('redmi') || n.includes('xiaomi') || n.includes('huawei') || n.includes('oppo'))
     return 'bi-phone';
   if (n.includes('ipad') || n.includes('tablet'))
@@ -304,15 +364,16 @@ function deviceIcon(name = '', isWifi = false) {
 
 async function apiFetch(url, opts = {}) {
   const res = await fetch(url, opts);
-  const data = await res.json();
+  let data;
+  try { data = await res.json(); } catch { throw new Error(`HTTP ${res.status} (réponse non-JSON)`); }
   if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
 
 function escHtml(s) {
-  return String(s)
+  return String(s ?? '')
     .replace(/&/g, '&amp;').replace(/</g, '&lt;')
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-function esc(s) { return String(s).replace(/'/g, "\\'"); }
+function esc(s) { return String(s ?? '').replace(/'/g, "\\'"); }
