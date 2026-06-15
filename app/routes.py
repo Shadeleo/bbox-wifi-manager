@@ -1,7 +1,8 @@
 import os
 from datetime import datetime, timedelta
+from functools import wraps
 
-from flask import Blueprint, jsonify, render_template, request
+from flask import Blueprint, jsonify, redirect, render_template, request, session, url_for
 from dotenv import load_dotenv
 
 from .bbox import BboxClient
@@ -14,9 +15,20 @@ bp = Blueprint("main", __name__)
 
 def _client() -> BboxClient:
     return BboxClient(
-        host=os.getenv("BBOX_HOST", "192.168.1.254"),
-        password=os.getenv("BBOX_PASSWORD", ""),
+        host=session.get("bbox_host", os.getenv("BBOX_HOST", "192.168.1.254")),
+        password=session.get("bbox_password", os.getenv("BBOX_PASSWORD", "")),
     )
+
+
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get("authenticated"):
+            if request.path.startswith("/api/"):
+                return jsonify({"error": "Non authentifié", "redirect": "/login"}), 401
+            return redirect(url_for("main.login_page"))
+        return f(*args, **kwargs)
+    return decorated
 
 
 def _calc_last_seen(lastseen_secs: int | None) -> str | None:
@@ -29,19 +41,54 @@ def _calc_last_seen(lastseen_secs: int | None) -> str | None:
     )
 
 
-@bp.get("/")
-def index():
-    return render_template("index.html")
+# ── Auth ──────────────────────────────────────────────────────────────────────
 
+@bp.get("/login")
+def login_page():
+    if session.get("authenticated"):
+        return redirect(url_for("main.index"))
+    return render_template("login.html")
+
+
+@bp.post("/login")
+def do_login():
+    host     = request.form.get("host", "192.168.1.254").strip()
+    password = request.form.get("password", "").strip()
+    try:
+        client = BboxClient(host=host, password=password)
+        client.login()
+        session["authenticated"] = True
+        session["bbox_host"]     = host
+        session["bbox_password"] = password
+        return redirect(url_for("main.index"))
+    except Exception as exc:
+        return render_template("login.html", error=str(exc))
+
+
+@bp.post("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("main.login_page"))
+
+
+# ── Pages ─────────────────────────────────────────────────────────────────────
+
+@bp.get("/")
+@login_required
+def index():
+    return render_template("index.html", bbox_host=session.get("bbox_host", ""))
+
+
+# ── API ───────────────────────────────────────────────────────────────────────
 
 @bp.get("/api/devices")
+@login_required
 def api_devices():
     try:
         client = _client()
         client.login()
         hosts = client.get_all_hosts()
 
-        # Mise à jour de l'historique
         for host in hosts:
             mac      = host.get("macaddress", "").upper()
             hostname = str(host.get("hostname") or host.get("id") or "Inconnu")
@@ -61,7 +108,6 @@ def api_devices():
             db         = db_index.get(mac, {})
             link       = host.get("link", "")
             is_wifi    = any(w in link.lower() for w in ("wifi", "wireless"))
-            # Blocage détecté via contrôle parental (confirmé sur firmware 25.x)
             is_blocked = host.get("parentalcontrol", {}).get("enable") == 1
 
             if is_blocked:
@@ -82,16 +128,14 @@ def api_devices():
                 "last_seen":  _calc_last_seen(host.get("lastseen")) or db.get("last_seen"),
             })
 
-        return jsonify({
-            "devices":       devices,
-            "blocked_count": blocked_count,
-        })
+        return jsonify({"devices": devices, "blocked_count": blocked_count})
 
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
 
 @bp.get("/api/history")
+@login_required
 def api_history():
     try:
         return jsonify({"devices": get_all_devices()})
@@ -100,9 +144,10 @@ def api_history():
 
 
 @bp.post("/api/disconnect")
+@login_required
 def api_disconnect():
     data = request.get_json(force=True)
-    mac = data.get("mac", "").upper()
+    mac  = data.get("mac", "").upper()
     try:
         client = _client()
         client.login()
@@ -113,8 +158,9 @@ def api_disconnect():
 
 
 @bp.post("/api/block")
+@login_required
 def api_block():
-    data = request.get_json(force=True)
+    data     = request.get_json(force=True)
     mac      = data.get("mac", "").upper()
     hostname = data.get("hostname", "")
     try:
@@ -128,6 +174,7 @@ def api_block():
 
 
 @bp.delete("/api/block")
+@login_required
 def api_unblock():
     mac = request.args.get("mac", "").upper()
     try:
@@ -141,8 +188,9 @@ def api_unblock():
 
 
 @bp.post("/api/kick-and-block")
+@login_required
 def api_kick_and_block():
-    data = request.get_json(force=True)
+    data     = request.get_json(force=True)
     mac      = data.get("mac", "").upper()
     hostname = data.get("hostname", "")
     try:
@@ -151,7 +199,7 @@ def api_kick_and_block():
         try:
             client.disconnect_mac(mac)
         except Exception:
-            pass  # Le kick peut échouer (Ethernet, déjà déconnecté…), on bloque quand même
+            pass
         client.block_mac(mac, hostname)
         set_blocked(mac, True)
         return jsonify({"ok": True})
