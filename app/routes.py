@@ -20,7 +20,6 @@ def _client() -> BboxClient:
 
 
 def _calc_last_seen(lastseen_secs: int | None) -> str | None:
-    """Convertit un delta en secondes en timestamp ISO lisible."""
     if lastseen_secs is None:
         return None
     if lastseen_secs == 0:
@@ -40,29 +39,34 @@ def api_devices():
     try:
         client = _client()
         client.login()
-        hosts    = client.get_all_hosts()
-        acl_rules = client.get_acl_rules()
-        blocked_macs = {r.get("mac", "").upper() for r in acl_rules}
+        hosts = client.get_all_hosts()
 
-        # Mise à jour de l'historique pour chaque appareil
+        # Mise à jour de l'historique
         for host in hosts:
             mac      = host.get("macaddress", "").upper()
-            hostname = host.get("hostname") or host.get("id", "Inconnu")
+            hostname = str(host.get("hostname") or host.get("id") or "Inconnu")
             ip       = host.get("ipaddress", "")
-            first    = host.get("firstseen")
-            last     = _calc_last_seen(host.get("lastseen"))
             if mac:
-                upsert_device(mac, hostname, ip, first, last)
+                upsert_device(mac, hostname, ip,
+                              host.get("firstseen"),
+                              _calc_last_seen(host.get("lastseen")))
 
         db_index = {d["mac"]: d for d in get_all_devices()}
 
         devices = []
+        blocked_count = 0
         for host in hosts:
-            mac      = host.get("macaddress", "").upper()
-            hostname = host.get("hostname") or host.get("id", "Inconnu")
-            db       = db_index.get(mac, {})
-            link     = host.get("link", "")
-            is_wifi  = any(w in link.lower() for w in ("wifi", "wireless"))
+            mac        = host.get("macaddress", "").upper()
+            hostname   = str(host.get("hostname") or host.get("id") or "Inconnu")
+            db         = db_index.get(mac, {})
+            link       = host.get("link", "")
+            is_wifi    = any(w in link.lower() for w in ("wifi", "wireless"))
+            # Blocage détecté via contrôle parental (confirmé sur firmware 25.x)
+            is_blocked = host.get("parentalcontrol", {}).get("enable") == 1
+
+            if is_blocked:
+                blocked_count += 1
+                set_blocked(mac, True)
 
             devices.append({
                 "hostname":   hostname,
@@ -73,24 +77,14 @@ def api_devices():
                 "rssi":       host.get("rssi"),
                 "band":       host.get("wifitechnology") or host.get("band", ""),
                 "is_wifi":    is_wifi,
-                "is_blocked": mac in blocked_macs,
+                "is_blocked": is_blocked,
                 "first_seen": host.get("firstseen") or db.get("first_seen"),
                 "last_seen":  _calc_last_seen(host.get("lastseen")) or db.get("last_seen"),
             })
 
-        acl = [
-            {
-                "rule_id":  r.get("id"),
-                "mac":      r.get("mac", "").upper(),
-                "hostname": r.get("hostname", ""),
-            }
-            for r in acl_rules
-        ]
-
         return jsonify({
             "devices":       devices,
-            "acl":           acl,
-            "blocked_count": len(blocked_macs),
+            "blocked_count": blocked_count,
         })
 
     except Exception as exc:
@@ -101,6 +95,19 @@ def api_devices():
 def api_history():
     try:
         return jsonify({"devices": get_all_devices()})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@bp.post("/api/disconnect")
+def api_disconnect():
+    data = request.get_json(force=True)
+    mac = data.get("mac", "").upper()
+    try:
+        client = _client()
+        client.login()
+        client.disconnect_mac(mac)
+        return jsonify({"ok": True})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
@@ -120,15 +127,33 @@ def api_block():
         return jsonify({"error": str(exc)}), 500
 
 
-@bp.delete("/api/block/<int:rule_id>")
-def api_unblock(rule_id: int):
+@bp.delete("/api/block")
+def api_unblock():
     mac = request.args.get("mac", "").upper()
     try:
         client = _client()
         client.login()
-        client.unblock_mac(rule_id)
-        if mac:
-            set_blocked(mac, False)
+        client.unblock_mac(mac)
+        set_blocked(mac, False)
+        return jsonify({"ok": True})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@bp.post("/api/kick-and-block")
+def api_kick_and_block():
+    data = request.get_json(force=True)
+    mac      = data.get("mac", "").upper()
+    hostname = data.get("hostname", "")
+    try:
+        client = _client()
+        client.login()
+        try:
+            client.disconnect_mac(mac)
+        except Exception:
+            pass  # Le kick peut échouer (Ethernet, déjà déconnecté…), on bloque quand même
+        client.block_mac(mac, hostname)
+        set_blocked(mac, True)
         return jsonify({"ok": True})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
