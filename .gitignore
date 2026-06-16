@@ -1,9 +1,41 @@
+# Secrets
 .env
+*.env
+.env.*
+
+# Base de données locale
+data/
+*.db
+*.sqlite3
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environnements virtuels
 .venv/
 venv/
+env/
+
+# Logs
 *.log
-data/history.db
+logs/
+
+# IDE / outils
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code
 .claude/
+
+# OS
+.DS_Store
+Thumbs.db
