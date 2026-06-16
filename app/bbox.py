@@ -37,7 +37,7 @@ class BboxClient:
             data=body,
             headers=hdrs,
             allow_redirects=False,
-            timeout=5,
+            timeout=15,
         )
         if r1.status_code != 302:
             r1.raise_for_status()
@@ -48,7 +48,7 @@ class BboxClient:
 
         # Étape 2 : POST vers Bytel → reçoit le cookie BBOX_ID
         r2 = self.session.post(bytel_url, data=body, headers=hdrs,
-                               allow_redirects=False, timeout=10)
+                               allow_redirects=False, timeout=20)
         if r2.status_code not in (200, 204):
             raise RuntimeError(
                 f"Authentification Bytel échouée (HTTP {r2.status_code})"
@@ -65,7 +65,7 @@ class BboxClient:
         """Récupère un jeton CSRF frais pour les opérations d'écriture."""
         for attempt in range(3):
             try:
-                resp = self.session.get(f"{self.api_url}/device/token", timeout=5)
+                resp = self.session.get(f"{self.api_url}/device/token", timeout=15)
                 resp.raise_for_status()
                 return resp.json()[0]["device"]["token"]
             except Exception:
@@ -102,7 +102,7 @@ class BboxClient:
             "DELETE": self.session.delete,
         }[method.upper()]
 
-        kwargs: dict = {"allow_redirects": False, "timeout": 5}
+        kwargs: dict = {"allow_redirects": False, "timeout": 15}
         if method.upper() != "DELETE":
             kwargs["data"] = body
             kwargs["headers"] = hdrs
@@ -113,7 +113,7 @@ class BboxClient:
         if r.status_code in (301, 302, 303, 307, 308):
             redirect_url = r.headers.get("Location", "")
             log.debug("  redirect → %s", redirect_url[:80])
-            r_kwargs: dict = {"allow_redirects": False, "timeout": 10, "verify": False}
+            r_kwargs: dict = {"allow_redirects": False, "timeout": 20, "verify": False}
             if method.upper() != "DELETE":
                 r_kwargs["data"] = body
                 r_kwargs["headers"] = hdrs
@@ -131,10 +131,10 @@ class BboxClient:
 
     def _get(self, path: str) -> list | dict:
         self._ensure_auth()
-        resp = self.session.get(f"{self.api_url}{path}", timeout=5)
+        resp = self.session.get(f"{self.api_url}{path}", timeout=15)
         if resp.status_code == 401:
             self.login()
-            resp = self.session.get(f"{self.api_url}{path}", timeout=5)
+            resp = self.session.get(f"{self.api_url}{path}", timeout=15)
         resp.raise_for_status()
         return resp.json()
 
