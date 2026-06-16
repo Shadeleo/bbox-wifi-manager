@@ -159,6 +159,11 @@ class BboxClient:
         data = self._get("/hosts")
         return data[0].get("hosts", {}).get("list", [])
 
+    def get_wan_stats(self) -> dict:
+        """Retourne les compteurs WAN (octets et débit) de la Bbox."""
+        data = self._get("/wan/ip/stats")
+        return data[0].get("wan", {}).get("ip", {}).get("stats", {})
+
     def get_wifi_hosts(self) -> list[dict]:
         """Retourne uniquement les appareils connectés en WiFi."""
         return [

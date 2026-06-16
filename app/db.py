@@ -2,7 +2,7 @@
 
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "history.db")
 
@@ -24,6 +24,16 @@ def init_db() -> None:
                 first_seen TEXT NOT NULL,
                 last_seen  TEXT NOT NULL,
                 is_blocked INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS network_stats (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts       TEXT NOT NULL,
+                rx_bytes INTEGER NOT NULL,
+                tx_bytes INTEGER NOT NULL,
+                rx_kbps  INTEGER NOT NULL,
+                tx_kbps  INTEGER NOT NULL
             )
         """)
 
@@ -69,5 +79,24 @@ def get_all_devices() -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
             "SELECT * FROM devices ORDER BY last_seen DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def insert_network_stat(ts: str, rx_bytes: int, tx_bytes: int, rx_kbps: int, tx_kbps: int) -> None:
+    cutoff = (datetime.now() - timedelta(days=30)).isoformat(sep=" ", timespec="seconds")
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO network_stats (ts, rx_bytes, tx_bytes, rx_kbps, tx_kbps) VALUES (?,?,?,?,?)",
+            (ts, rx_bytes, tx_bytes, rx_kbps, tx_kbps),
+        )
+        conn.execute("DELETE FROM network_stats WHERE ts < ?", (cutoff,))
+
+
+def get_network_stats(hours: int = 24) -> list[dict]:
+    cutoff = (datetime.now() - timedelta(hours=hours)).isoformat(sep=" ", timespec="seconds")
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM network_stats WHERE ts >= ? ORDER BY ts ASC", (cutoff,)
         ).fetchall()
     return [dict(r) for r in rows]
