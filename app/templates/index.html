@@ -19,6 +19,19 @@
         <div class="navbar-sub">Bouygues Telecom</div>
       </div>
     </div>
+
+    <!-- ── View switcher ── -->
+    <div class="view-switcher">
+      <button class="view-btn active" onclick="switchView('local')" id="btn-view-local">
+        <i class="bi bi-grid-3x3-gap-fill"></i>
+        <span>Mon interface</span>
+      </button>
+      <button class="view-btn" onclick="switchView('bbox')" id="btn-view-bbox">
+        <i class="bi bi-router"></i>
+        <span>Interface Bbox</span>
+      </button>
+    </div>
+
     <div class="d-flex align-items-center gap-3">
       <span class="text-white-50 small" id="last-refresh"></span>
       <span class="bbox-host-badge">
@@ -35,7 +48,13 @@
     </div>
   </nav>
 
-  <div class="container-fluid py-4 px-4">
+  <!-- ── Bbox embedded view ──────────────────────────────────────────────── -->
+  <div id="bbox-view" style="display:none;width:100%;height:calc(100vh - 72px);">
+    <iframe src="/proxy/bbox/" id="bbox-iframe"
+            style="width:100%;height:100%;border:none;display:block;"></iframe>
+  </div>
+
+  <div id="local-view" class="container-fluid py-4 px-4">
 
     <!-- ── Stat cards ──────────────────────────────────────────────────── -->
     <div class="row g-3 mb-4">
@@ -195,9 +214,33 @@
       </div>
 
     </div><!-- /tab-content -->
-  </div><!-- /container -->
+  </div><!-- /local-view -->
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script src="/static/app.js?v=16"></script>
+  <script>
+    let currentView = 'local';
+
+    function switchView(view) {
+      const localEl = document.getElementById('local-view');
+      const bboxEl  = document.getElementById('bbox-view');
+      const btnLocal = document.getElementById('btn-view-local');
+      const btnBbox  = document.getElementById('btn-view-bbox');
+
+      if (view === 'bbox') {
+        localEl.style.display = 'none';
+        bboxEl.style.display  = 'block';
+        btnBbox.classList.add('active');
+        btnLocal.classList.remove('active');
+        currentView = 'bbox';
+      } else {
+        bboxEl.style.display  = 'none';
+        localEl.style.display = 'block';
+        btnLocal.classList.add('active');
+        btnBbox.classList.remove('active');
+        currentView = 'local';
+      }
+    }
+  </script>
 </body>
 </html>
