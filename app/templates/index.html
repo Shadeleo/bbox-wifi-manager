@@ -4,9 +4,17 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Bbox WiFi Manager</title>
+  <script>
+    (function() {
+      if (localStorage.getItem('theme') !== 'light') {
+        document.documentElement.setAttribute('data-bs-theme', 'dark');
+      }
+    })();
+  </script>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet" />
   <link href="/static/style.css" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 </head>
 <body>
 
@@ -32,11 +40,14 @@
       </button>
     </div>
 
-    <div class="d-flex align-items-center gap-3">
+    <div class="d-flex align-items-center gap-3 flex-wrap justify-content-end">
       <span class="text-white-50 small" id="last-refresh"></span>
       <span class="bbox-host-badge">
         <i class="bi bi-router me-1"></i>{{ bbox_host }}
       </span>
+      <button class="btn btn-refresh" id="theme-toggle-btn" onclick="toggleTheme()">
+        <i class="bi bi-moon-stars-fill me-1" id="theme-toggle-icon"></i><span id="theme-toggle-label">Mode sobre</span>
+      </button>
       <button class="btn btn-refresh" onclick="refreshAll()">
         <i class="bi bi-arrow-clockwise me-1"></i>Actualiser
       </button>
@@ -54,7 +65,7 @@
             style="width:100%;height:100%;border:none;display:block;"></iframe>
   </div>
 
-  <div id="local-view" class="container-fluid py-4 px-4">
+  <div id="local-view" class="container-fluid py-3 py-md-4 px-2 px-md-3 px-lg-4">
 
     <!-- ── Stat cards ──────────────────────────────────────────────────── -->
     <div class="row g-3 mb-4">
@@ -64,6 +75,15 @@
             <div class="stat-icon bg-primary-soft"><i class="bi bi-broadcast text-primary"></i></div>
             <div class="stat-value" id="stat-connected">—</div>
             <div class="stat-label">Connectés maintenant</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-sm-6 col-xl-3">
+        <div class="stat-card card border-0">
+          <div class="card-body">
+            <div class="stat-icon bg-info-soft"><i class="bi bi-hdd-network text-info"></i></div>
+            <div class="stat-value" id="stat-known">—</div>
+            <div class="stat-label">Appareils sur la Bbox</div>
           </div>
         </div>
       </div>
@@ -102,7 +122,8 @@
     <!-- ── Tabs ────────────────────────────────────────────────────────── -->
     <ul class="nav nav-tabs mb-0" id="mainTabs" role="tablist">
       <li class="nav-item">
-        <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-live" type="button">
+        <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-live" type="button"
+                id="tab-live-btn">
           <i class="bi bi-broadcast me-1"></i>En direct
           <span class="tab-badge" id="badge-live"></span>
         </button>
@@ -118,6 +139,32 @@
         <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-3d" type="button"
                 id="tab-3d-btn">
           <i class="bi bi-diagram-3 me-1"></i>Vue réseau
+        </button>
+      </li>
+      <li class="nav-item">
+        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-conso" type="button"
+                id="tab-conso-btn">
+          <i class="bi bi-pie-chart-fill me-1"></i>Consommation
+        </button>
+      </li>
+      <li class="nav-item ms-auto d-flex align-items-center">
+        <div class="search-wrap" id="live-search-wrap">
+          <i class="bi bi-search search-icon"></i>
+          <input type="text" class="form-control search-input" id="live-search"
+                 placeholder="Nom, IP ou MAC…" oninput="filterLive()" />
+        </div>
+        <div class="search-wrap d-none" id="history-search-wrap">
+          <i class="bi bi-search search-icon"></i>
+          <input type="text" class="form-control search-input" id="history-search"
+                 placeholder="Nom, IP ou MAC…" oninput="filterHistory()" />
+        </div>
+        <div class="search-wrap d-none" id="graph-search-wrap">
+          <i class="bi bi-search search-icon"></i>
+          <input type="text" class="form-control search-input" id="graph-search"
+                 placeholder="Nom, IP ou MAC…" oninput="filterGraph()" />
+        </div>
+        <button class="btn btn-unit-toggle d-none" id="unit-toggle-btn" onclick="toggleBandwidthUnit()">
+          <i class="bi bi-arrow-repeat me-1"></i>Afficher en <span id="unit-toggle-label">Mo/s</span>
         </button>
       </li>
     </ul>
@@ -139,14 +186,14 @@
             <table class="table table-hover align-middle mb-0">
               <thead>
                 <tr>
-                  <th>Appareil</th>
-                  <th>Adresse IP</th>
-                  <th>Adresse MAC</th>
-                  <th>Première connexion</th>
-                  <th>Dernière connexion</th>
-                  <th>Connexion</th>
-                  <th>Signal</th>
-                  <th>Statut</th>
+                  <th>Appareil <button class="sort-btn" data-key="hostname" onclick="sortLiveTable('hostname')"><i class="bi bi-arrow-down-up"></i></button></th>
+                  <th>Adresse IP <button class="sort-btn" data-key="ip" onclick="sortLiveTable('ip')"><i class="bi bi-arrow-down-up"></i></button></th>
+                  <th class="d-none d-md-table-cell">Adresse MAC <button class="sort-btn" data-key="mac" onclick="sortLiveTable('mac')"><i class="bi bi-arrow-down-up"></i></button></th>
+                  <th class="d-none d-xl-table-cell">Première connexion <button class="sort-btn" data-key="first_seen" onclick="sortLiveTable('first_seen')"><i class="bi bi-arrow-down-up"></i></button></th>
+                  <th class="d-none d-lg-table-cell">Dernière connexion <button class="sort-btn" data-key="last_seen" onclick="sortLiveTable('last_seen')"><i class="bi bi-arrow-down-up"></i></button></th>
+                  <th class="d-none d-sm-table-cell col-narrow">Connexion <button class="sort-btn" data-key="link" onclick="sortLiveTable('link')"><i class="bi bi-arrow-down-up"></i></button></th>
+                  <th class="d-none d-sm-table-cell col-narrow">Signal <button class="sort-btn" data-key="rssi" onclick="sortLiveTable('rssi')"><i class="bi bi-arrow-down-up"></i></button></th>
+                  <th class="col-narrow">Statut <button class="sort-btn" data-key="status" onclick="sortLiveTable('status')"><i class="bi bi-arrow-down-up"></i></button></th>
                   <th>Action</th>
                 </tr>
               </thead>
@@ -158,13 +205,8 @@
 
       <!-- ── Historique ─────────────────────────────────────────────── -->
       <div class="tab-pane fade" id="tab-history" role="tabpanel">
-        <div class="d-flex justify-content-between align-items-center p-4 border-bottom">
+        <div class="p-4 border-bottom">
           <h6 class="fw-semibold mb-0 text-muted">Tous les appareils détectés</h6>
-          <div class="search-wrap">
-            <i class="bi bi-search search-icon"></i>
-            <input type="text" class="form-control search-input" id="history-search"
-                   placeholder="Nom, IP ou MAC…" oninput="filterHistory()" />
-          </div>
         </div>
         <div id="history-loading" class="loading-state">
           <div class="spinner-border text-primary mb-3"></div>
@@ -175,12 +217,12 @@
             <table class="table table-hover align-middle mb-0">
               <thead>
                 <tr>
-                  <th>Appareil</th>
-                  <th>Adresse IP</th>
-                  <th>Adresse MAC</th>
-                  <th>Première connexion</th>
-                  <th>Dernière connexion</th>
-                  <th>Statut</th>
+                  <th>Appareil <button class="sort-btn" data-key="hostname" onclick="sortHistoryTable('hostname')"><i class="bi bi-arrow-down-up"></i></button></th>
+                  <th>Adresse IP <button class="sort-btn" data-key="ip" onclick="sortHistoryTable('ip')"><i class="bi bi-arrow-down-up"></i></button></th>
+                  <th class="d-none d-md-table-cell">Adresse MAC <button class="sort-btn" data-key="mac" onclick="sortHistoryTable('mac')"><i class="bi bi-arrow-down-up"></i></button></th>
+                  <th class="d-none d-lg-table-cell">Première connexion <button class="sort-btn" data-key="first_seen" onclick="sortHistoryTable('first_seen')"><i class="bi bi-arrow-down-up"></i></button></th>
+                  <th class="d-none d-sm-table-cell">Dernière connexion <button class="sort-btn" data-key="last_seen" onclick="sortHistoryTable('last_seen')"><i class="bi bi-arrow-down-up"></i></button></th>
+                  <th class="col-narrow">Statut <button class="sort-btn" data-key="status_history" onclick="sortHistoryTable('status_history')"><i class="bi bi-arrow-down-up"></i></button></th>
                   <th>Action</th>
                 </tr>
               </thead>
@@ -208,6 +250,84 @@
                 <div class="panel-info-row"><span>Signal</span><span id="panel-rssi">—</span></div>
               </div>
               <div class="panel-actions" id="panel-actions"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Consommation ───────────────────────────────────────────── -->
+      <div class="tab-pane fade" id="tab-conso" role="tabpanel">
+        <div class="p-4">
+          <div class="row g-3 mb-4">
+            <div class="col-sm-6 col-lg-4">
+              <div class="stat-card card border-0">
+                <div class="card-body">
+                  <div class="stat-icon bg-primary-soft"><i class="bi bi-hdd-stack text-primary"></i></div>
+                  <div class="stat-value" id="conso-total">—</div>
+                  <div class="stat-label">Conso. totale (depuis reboot Bbox)</div>
+                </div>
+              </div>
+            </div>
+            <div class="col-sm-6 col-lg-4">
+              <div class="stat-card card border-0">
+                <div class="card-body">
+                  <div class="stat-icon bg-warning-soft"><i class="bi bi-speedometer2 text-warning"></i></div>
+                  <div class="stat-value" id="conso-peak">—</div>
+                  <div class="stat-label">Pic de bande passante observé</div>
+                </div>
+              </div>
+            </div>
+            <div class="col-sm-6 col-lg-4">
+              <div class="stat-card card border-0">
+                <div class="card-body">
+                  <div class="stat-icon bg-success-soft"><i class="bi bi-activity text-success"></i></div>
+                  <div class="stat-value" id="conso-live">—</div>
+                  <div class="stat-label">Débit actuel (temps réel)</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <h6 class="text-muted fw-semibold mb-2">Débit en temps réel</h6>
+          <div class="row g-3 mb-4">
+            <div class="col-lg-8">
+              <div class="card border-0 panel-card p-3" style="height:240px; position:relative;">
+                <canvas id="chart-live"></canvas>
+              </div>
+            </div>
+            <div class="col-lg-4 d-flex flex-column gap-3">
+              <div class="card border-0 panel-card p-3 flex-fill">
+                <h6 class="text-muted fw-semibold mb-3 small text-uppercase" style="letter-spacing:.05em;">
+                  <i class="bi bi-upload me-1"></i>Top 3 — Envoi
+                </h6>
+                <div id="top-upload-list"><p class="text-muted small mb-0">—</p></div>
+              </div>
+              <div class="card border-0 panel-card p-3 flex-fill">
+                <h6 class="text-muted fw-semibold mb-3 small text-uppercase" style="letter-spacing:.05em;">
+                  <i class="bi bi-download me-1"></i>Top 3 — Téléchargement
+                </h6>
+                <div id="top-download-list"><p class="text-muted small mb-0">—</p></div>
+              </div>
+            </div>
+          </div>
+
+          <h6 class="text-muted fw-semibold mb-2">Historique (24h)</h6>
+          <div class="row g-3">
+            <div class="col-lg-8">
+              <div class="card border-0 panel-card p-3" style="height:340px; position:relative;">
+                <canvas id="chart-bandwidth"></canvas>
+              </div>
+            </div>
+            <div class="col-lg-4">
+              <div class="card border-0 panel-card p-3 d-flex flex-column" style="height:340px">
+                <div style="position:relative; flex:1 1 auto; min-height:0;">
+                  <canvas id="chart-activity"></canvas>
+                </div>
+                <p class="text-muted small mt-2 mb-0 flex-shrink-0">
+                  Activité relative par appareil WiFi (indice 0-8 fourni par la Bbox,
+                  pas un volume de données réel).
+                </p>
+              </div>
             </div>
           </div>
         </div>
@@ -241,6 +361,26 @@
         currentView = 'local';
       }
     }
+
+    function applyThemeButtonLabel() {
+      const isDark = document.documentElement.getAttribute('data-bs-theme') === 'dark';
+      document.getElementById('theme-toggle-icon').className = isDark ? 'bi bi-sun-fill me-1' : 'bi bi-moon-stars-fill me-1';
+      document.getElementById('theme-toggle-label').textContent = isDark ? 'Mode clair' : 'Mode sobre';
+    }
+
+    function toggleTheme() {
+      const isDark = document.documentElement.getAttribute('data-bs-theme') === 'dark';
+      if (isDark) {
+        document.documentElement.removeAttribute('data-bs-theme');
+        localStorage.setItem('theme', 'light');
+      } else {
+        document.documentElement.setAttribute('data-bs-theme', 'dark');
+        localStorage.setItem('theme', 'dark');
+      }
+      applyThemeButtonLabel();
+    }
+
+    applyThemeButtonLabel();
   </script>
 </body>
 </html>

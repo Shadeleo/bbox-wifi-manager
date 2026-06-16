@@ -1,5 +1,7 @@
 import ipaddress
+import logging
 import os
+import time
 from datetime import datetime, timedelta
 from functools import wraps
 
@@ -10,18 +12,32 @@ from flask import Blueprint, jsonify, redirect, render_template, request, sessio
 from dotenv import load_dotenv
 
 from .bbox import BboxClient
-from .db import get_all_devices, set_blocked, upsert_device
+from .db import get_all_devices, get_network_stats, insert_network_stat, set_blocked, upsert_device
 
 load_dotenv()
 
+log = logging.getLogger(__name__)
+
 bp = Blueprint("main", __name__)
+
+# Identifiants actifs partagés avec le poller d'arrière-plan (pas d'accès à la
+# session Flask en dehors d'une requête HTTP). Pré-remplis depuis .env, mis à
+# jour à chaque connexion réussie via do_login().
+_active_creds = {
+    "host":     os.getenv("BBOX_HOST", "192.168.1.254"),
+    "password": os.getenv("BBOX_PASSWORD", ""),
+}
 
 
 def _client() -> BboxClient:
-    return BboxClient(
-        host=session.get("bbox_host", os.getenv("BBOX_HOST", "192.168.1.254")),
-        password=session.get("bbox_password", os.getenv("BBOX_PASSWORD", "")),
-    )
+    """Client Bbox authentifié, réutilisant la session mise en cache (évite de
+    refaire le handshake Bbox+Bytel à chaque appel API)."""
+    host = session.get("bbox_host", os.getenv("BBOX_HOST", "192.168.1.254"))
+    password = session.get("bbox_password", os.getenv("BBOX_PASSWORD", ""))
+    client = BboxClient(host=host, password=password)
+    client.session = _get_bbox_session(host, password)
+    client._authenticated = True
+    return client
 
 
 def login_required(f):
@@ -70,6 +86,8 @@ def do_login():
         session["authenticated"] = True
         session["bbox_host"]     = host
         session["bbox_password"] = password
+        _active_creds["host"]     = host
+        _active_creds["password"] = password
         return redirect(url_for("main.index"))
     except Exception as exc:
         return render_template("login.html", error=str(exc))
@@ -96,7 +114,6 @@ def index():
 def api_devices():
     try:
         client = _client()
-        client.login()
         hosts = client.get_all_hosts()
 
         for host in hosts:
@@ -119,6 +136,19 @@ def api_devices():
             link       = host.get("link", "")
             is_wifi    = any(w in link.lower() for w in ("wifi", "wireless"))
             is_blocked = host.get("parentalcontrol", {}).get("enable") == 1
+            wireless   = host.get("wireless") or {}
+            try:
+                rssi = int(wireless.get("rssi0"))
+            except (TypeError, ValueError):
+                rssi = None
+            try:
+                tx_usage = int(wireless.get("txUsage"))
+            except (TypeError, ValueError):
+                tx_usage = None
+            try:
+                rx_usage = int(wireless.get("rxUsage"))
+            except (TypeError, ValueError):
+                rx_usage = None
 
             if is_blocked:
                 blocked_count += 1
@@ -130,8 +160,10 @@ def api_devices():
                 "mac":        mac,
                 "link":       link,
                 "active":     host.get("active", 0),
-                "rssi":       host.get("rssi"),
-                "band":       host.get("wifitechnology") or host.get("band", ""),
+                "rssi":       rssi,
+                "band":       wireless.get("band", ""),
+                "tx_usage":   tx_usage,
+                "rx_usage":   rx_usage,
                 "is_wifi":    is_wifi,
                 "is_blocked": is_blocked,
                 "first_seen": host.get("firstseen") or db.get("first_seen"),
@@ -153,6 +185,95 @@ def api_history():
         return jsonify({"error": str(exc)}), 500
 
 
+def _get_device_activity() -> list[dict]:
+    """Indice d'activité relatif (0-8) par appareil WiFi actif."""
+    activity = []
+    client = _client()
+    for host in client.get_all_hosts():
+        if not host.get("active"):
+            continue
+        wireless = host.get("wireless") or {}
+        if not wireless:
+            continue
+        try:
+            tx_usage = int(wireless.get("txUsage", 0))
+            rx_usage = int(wireless.get("rxUsage", 0))
+        except (TypeError, ValueError):
+            continue
+        activity.append({
+            "hostname": str(host.get("hostname") or host.get("id") or "Inconnu"),
+            "tx_usage": tx_usage,
+            "rx_usage": rx_usage,
+            "usage": max(tx_usage, rx_usage),
+        })
+    return activity
+
+
+_activity_cache: dict = {"data": [], "ts": 0.0}
+_ACTIVITY_CACHE_TTL = 5  # secondes — évite de réinterroger /hosts à chaque poll live (2s)
+
+
+def _get_device_activity_cached() -> list[dict]:
+    now = time.monotonic()
+    if now - _activity_cache["ts"] > _ACTIVITY_CACHE_TTL:
+        _activity_cache["data"] = _get_device_activity()
+        _activity_cache["ts"] = now
+    return _activity_cache["data"]
+
+
+@bp.get("/api/network-stats/live")
+@login_required
+def api_network_stats_live():
+    try:
+        client = _client()
+        stats = client.get_wan_stats()
+        rx = stats.get("rx", {})
+        tx = stats.get("tx", {})
+        try:
+            activity = _get_device_activity_cached()
+        except Exception as exc:
+            log.warning("Activité par appareil indisponible : %s", exc)
+            activity = []
+        return jsonify({
+            "rx_kbps": int(rx.get("bandwidth", 0)),
+            "tx_kbps": int(tx.get("bandwidth", 0)),
+            "activity": activity,
+        })
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@bp.get("/api/network-stats")
+@login_required
+def api_network_stats():
+    try:
+        points = get_network_stats(hours=24)
+
+        total_gb = None
+        peak_mbps = 0.0
+        if points:
+            last = points[-1]
+            total_gb = (last["rx_bytes"] + last["tx_bytes"]) / 1e9
+            peak_mbps = max(
+                max(p["rx_kbps"], p["tx_kbps"]) for p in points
+            ) / 1000
+
+        try:
+            activity = _get_device_activity()
+        except Exception as exc:
+            log.warning("Activité par appareil indisponible : %s", exc)
+            activity = []
+
+        return jsonify({
+            "points": points,
+            "total_gb": total_gb,
+            "peak_mbps": round(peak_mbps, 2),
+            "activity": activity,
+        })
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 @bp.post("/api/disconnect")
 @login_required
 def api_disconnect():
@@ -160,7 +281,6 @@ def api_disconnect():
     mac  = data.get("mac", "").upper()
     try:
         client = _client()
-        client.login()
         client.disconnect_mac(mac)
         return jsonify({"ok": True})
     except Exception as exc:
@@ -175,7 +295,6 @@ def api_block():
     hostname = data.get("hostname", "")
     try:
         client = _client()
-        client.login()
         client.block_mac(mac, hostname)
         set_blocked(mac, True)
         return jsonify({"ok": True})
@@ -189,7 +308,6 @@ def api_unblock():
     mac = request.args.get("mac", "").upper()
     try:
         client = _client()
-        client.login()
         client.unblock_mac(mac)
         set_blocked(mac, False)
         return jsonify({"ok": True})
@@ -205,7 +323,6 @@ def api_kick_and_block():
     hostname = data.get("hostname", "")
     try:
         client = _client()
-        client.login()
         try:
             client.disconnect_mac(mac)
         except Exception:
@@ -246,6 +363,45 @@ def _get_bbox_session(bbox_host: str, password: str) -> _req.Session:
             client.login()
             _authed_sessions[bbox_host] = client.session
         return _authed_sessions[bbox_host]
+
+
+# ── Poller de bande passante (arrière-plan) ────────────────────────────────────
+
+_POLL_INTERVAL_SECONDS = 300
+
+
+def _poll_network_stats() -> None:
+    """Récupère un point de conso WAN depuis la Bbox et le stocke en base."""
+    try:
+        host = _active_creds["host"]
+        password = _active_creds["password"]
+        sess = _get_bbox_session(host, password)
+        client = BboxClient(host=host, password=password)
+        client.session = sess
+        client._authenticated = True
+        stats = client.get_wan_stats()
+        rx = stats.get("rx", {})
+        tx = stats.get("tx", {})
+        insert_network_stat(
+            ts=datetime.now().isoformat(sep=" ", timespec="seconds"),
+            rx_bytes=int(rx.get("bytes", 0)),
+            tx_bytes=int(tx.get("bytes", 0)),
+            rx_kbps=int(rx.get("bandwidth", 0)),
+            tx_kbps=int(tx.get("bandwidth", 0)),
+        )
+    except Exception as exc:
+        log.warning("Poll réseau échoué : %s", exc)
+
+
+def _network_poll_loop() -> None:
+    while True:
+        _poll_network_stats()
+        time.sleep(_POLL_INTERVAL_SECONDS)
+
+
+def start_network_poller() -> None:
+    """Démarre le thread d'arrière-plan qui collecte la conso réseau périodiquement."""
+    threading.Thread(target=_network_poll_loop, daemon=True).start()
 
 
 _PROXY_INTERCEPTOR = """
