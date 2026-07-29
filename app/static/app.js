@@ -5,10 +5,20 @@ let liveDevices    = [];
 let historyDevices = [];
 let historyLoaded  = false;
 let graph2D        = null;
+let liveSortKey    = null;
+let liveSortDir    = 1;
+let historySortKey = null;
+let historySortDir = 1;
+let bandwidthChart = null;
+let activityChart  = null;
+let liveChart       = null;
+let liveHistory     = [];
+let livePollTimer   = null;
 
 /* ── Bootstrap ──────────────────────────────────────────────────────────── */
 document.addEventListener('DOMContentLoaded', () => {
   loadDevices();
+  loadHistory();
 
   document.getElementById('history-tab-btn').addEventListener('shown.bs.tab', () => {
     if (!historyLoaded) loadHistory();
@@ -16,6 +26,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('tab-3d-btn').addEventListener('shown.bs.tab', () => {
     if (liveDevices.length) initGraph2D();
+  });
+
+  document.getElementById('tab-conso-btn').addEventListener('shown.bs.tab', () => {
+    loadNetworkStats();
+    startLivePolling();
+  });
+
+  document.getElementById('tab-conso-btn').addEventListener('hidden.bs.tab', () => {
+    stopLivePolling();
+  });
+
+  document.getElementById('mainTabs').addEventListener('shown.bs.tab', (e) => {
+    document.getElementById('live-search-wrap').classList.toggle('d-none', e.target.id !== 'tab-live-btn');
+    document.getElementById('history-search-wrap').classList.toggle('d-none', e.target.id !== 'history-tab-btn');
+    document.getElementById('graph-search-wrap').classList.toggle('d-none', e.target.id !== 'tab-3d-btn');
+    document.getElementById('unit-toggle-btn').classList.toggle('d-none', e.target.id !== 'tab-conso-btn');
   });
 });
 
@@ -26,7 +52,7 @@ async function loadDevices() {
   try {
     const data = await apiFetch('/api/devices');
     liveDevices = data.devices ?? [];
-    renderLiveTable();
+    filterLive();
     updateStats(data);
     updateRefreshTime();
     setBboxStatus(true);
@@ -44,7 +70,7 @@ async function loadHistory() {
     const data = await apiFetch('/api/history');
     historyDevices = data.devices ?? [];
     historyLoaded  = true;
-    renderHistoryTable(historyDevices);
+    filterHistory();
     document.getElementById('stat-total').textContent = historyDevices.length;
     document.getElementById('badge-history').textContent = historyDevices.length || '';
     setHistoryState('table');
@@ -52,6 +78,220 @@ async function loadHistory() {
     setHistoryState('table');
     console.error('Historique :', e.message);
   }
+}
+
+/* ── Consommation réseau ───────────────────────────────────────────────── */
+
+let bandwidthUnit  = 'mbps'; // 'mbps' | 'mops'
+let lastPeakMbps   = null;
+let lastLiveRxMbps = 0;
+let lastLiveTxMbps = 0;
+let lastBandwidthPoints = [];
+
+function unitLabel() { return bandwidthUnit === 'mbps' ? 'Mb/s' : 'Mo/s'; }
+function toDisplayUnit(mbps) { return bandwidthUnit === 'mbps' ? mbps : mbps / 8; }
+
+function toggleBandwidthUnit() {
+  bandwidthUnit = bandwidthUnit === 'mbps' ? 'mops' : 'mbps';
+  document.getElementById('unit-toggle-label').textContent = bandwidthUnit === 'mbps' ? 'Mo/s' : 'Mb/s';
+  refreshConsoDisplay();
+}
+
+function refreshConsoDisplay() {
+  document.getElementById('conso-peak').textContent =
+    lastPeakMbps ? `${toDisplayUnit(lastPeakMbps).toFixed(1)} ${unitLabel()}` : '—';
+  document.getElementById('conso-live').textContent =
+    `↓ ${toDisplayUnit(lastLiveRxMbps).toFixed(1)} / ↑ ${toDisplayUnit(lastLiveTxMbps).toFixed(1)} ${unitLabel()}`;
+  renderBandwidthChart(lastBandwidthPoints);
+  renderLiveChart();
+}
+
+function chartTextColor() {
+  return document.documentElement.getAttribute('data-bs-theme') === 'dark' ? '#e5e9f0' : '#0f172a';
+}
+function chartGridColor() {
+  return document.documentElement.getAttribute('data-bs-theme') === 'dark' ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)';
+}
+
+async function loadNetworkStats() {
+  try {
+    const data = await apiFetch('/api/network-stats');
+
+    document.getElementById('conso-total').textContent =
+      data.total_gb != null ? `${data.total_gb.toFixed(1)} Go` : '—';
+    lastPeakMbps = data.peak_mbps ?? null;
+    lastBandwidthPoints = data.points ?? [];
+    document.getElementById('conso-peak').textContent =
+      lastPeakMbps ? `${toDisplayUnit(lastPeakMbps).toFixed(1)} ${unitLabel()}` : '—';
+
+    renderBandwidthChart(lastBandwidthPoints);
+    renderActivityChart(data.activity ?? []);
+    renderTopLists(data.activity ?? []);
+  } catch (e) {
+    console.error('[loadNetworkStats]', e);
+  }
+}
+
+function renderTopLists(activity) {
+  const topUpload   = [...activity].sort((a, b) => b.tx_usage - a.tx_usage).slice(0, 3);
+  const topDownload = [...activity].sort((a, b) => b.rx_usage - a.rx_usage).slice(0, 3);
+  renderTopList('top-upload-list', topUpload, 'tx_usage');
+  renderTopList('top-download-list', topDownload, 'rx_usage');
+}
+
+const TOP_MEDALS = ['#fbbf24', '#cbd5e1', '#d97706'];
+
+function renderTopList(containerId, items, key) {
+  const container = document.getElementById(containerId);
+  if (items.length === 0 || items.every(d => d[key] === 0)) {
+    container.innerHTML = `<p class="text-muted small mb-0 text-center py-2">Aucune activité</p>`;
+    return;
+  }
+  container.innerHTML = items.map((d, i) => {
+    const level    = d[key] || 0;
+    const pct      = Math.round((level / 8) * 100);
+    const barColor = level >= 6 ? '#ef4444' : level >= 3 ? '#f59e0b' : '#22c55e';
+    return `
+    <div class="top-rank-row">
+      <div class="top-rank-medal" style="background:${TOP_MEDALS[i] || 'var(--border)'}">${i + 1}</div>
+      <div class="top-rank-icon"><i class="bi ${deviceIcon(d.hostname, true)}"></i></div>
+      <div class="top-rank-info">
+        <div class="top-rank-name">${escHtml(d.hostname)}</div>
+        <div class="top-rank-bar-wrap"><div class="top-rank-bar" style="width:${pct}%; background:${barColor}"></div></div>
+      </div>
+      <div class="top-rank-value">${level}/8</div>
+    </div>`;
+  }).join('');
+}
+
+function renderBandwidthChart(points) {
+  const canvas = document.getElementById('chart-bandwidth');
+  const labels = points.map(p => new Date(p.ts.replace(' ', 'T'))
+    .toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }));
+  const rx = points.map(p => toDisplayUnit(p.rx_kbps / 1000));
+  const tx = points.map(p => toDisplayUnit(p.tx_kbps / 1000));
+  const unit = unitLabel();
+
+  if (bandwidthChart) bandwidthChart.destroy();
+  bandwidthChart = new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: `Téléchargement (${unit})`, data: rx, borderColor: '#3b82f6',
+          backgroundColor: 'rgba(59,130,246,0.15)', fill: true, tension: 0.3, pointRadius: 0 },
+        { label: `Envoi (${unit})`, data: tx, borderColor: '#f59e0b',
+          backgroundColor: 'rgba(245,158,11,0.15)', fill: true, tension: 0.3, pointRadius: 0 },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: { ticks: { color: chartTextColor(), maxTicksLimit: 8 }, grid: { color: chartGridColor() } },
+        y: { ticks: { color: chartTextColor() }, grid: { color: chartGridColor() }, beginAtZero: true },
+      },
+      plugins: { legend: { labels: { color: chartTextColor() } } },
+    },
+  });
+}
+
+function renderActivityChart(activity) {
+  const canvas = document.getElementById('chart-activity');
+  const sorted = [...activity].sort((a, b) => b.usage - a.usage).slice(0, 8);
+
+  if (activityChart) { activityChart.destroy(); activityChart = null; }
+  if (sorted.length === 0) return;
+
+  const palette = ['#3b82f6', '#f59e0b', '#10b981', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
+  activityChart = new Chart(canvas, {
+    type: 'doughnut',
+    data: {
+      labels: sorted.map(a => a.hostname),
+      datasets: [{ data: sorted.map(a => a.usage), backgroundColor: palette }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { position: 'bottom', labels: { color: chartTextColor(), boxWidth: 12, font: { size: 11 } } } },
+    },
+  });
+}
+
+/* ── Débit en temps réel ──────────────────────────────────────────────── */
+
+const LIVE_POLL_MS = 2000;
+const LIVE_WINDOW   = 30; // 30 points × 2s = fenêtre glissante de 60s
+
+function startLivePolling() {
+  stopLivePolling();
+  liveHistory = [];
+  pollLiveStats();
+  livePollTimer = setInterval(pollLiveStats, LIVE_POLL_MS);
+}
+
+function stopLivePolling() {
+  if (livePollTimer) { clearInterval(livePollTimer); livePollTimer = null; }
+}
+
+async function pollLiveStats() {
+  try {
+    const data = await apiFetch('/api/network-stats/live');
+    lastLiveRxMbps = (data.rx_kbps || 0) / 1000;
+    lastLiveTxMbps = (data.tx_kbps || 0) / 1000;
+    liveHistory.push({ time: new Date(), rx: lastLiveRxMbps, tx: lastLiveTxMbps });
+    if (liveHistory.length > LIVE_WINDOW) liveHistory.shift();
+
+    document.getElementById('conso-live').textContent =
+      `↓ ${toDisplayUnit(lastLiveRxMbps).toFixed(1)} / ↑ ${toDisplayUnit(lastLiveTxMbps).toFixed(1)} ${unitLabel()}`;
+
+    renderLiveChart();
+    if (data.activity) renderTopLists(data.activity);
+  } catch (e) {
+    console.error('[pollLiveStats]', e);
+  }
+}
+
+function renderLiveChart() {
+  const canvas = document.getElementById('chart-live');
+  const labels = liveHistory.map(p =>
+    p.time.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+  const rx = liveHistory.map(p => toDisplayUnit(p.rx));
+  const tx = liveHistory.map(p => toDisplayUnit(p.tx));
+  const unit = unitLabel();
+
+  if (liveChart) {
+    liveChart.data.labels = labels;
+    liveChart.data.datasets[0].data = rx;
+    liveChart.data.datasets[0].label = `Téléchargement (${unit})`;
+    liveChart.data.datasets[1].data = tx;
+    liveChart.data.datasets[1].label = `Envoi (${unit})`;
+    liveChart.update('none');
+    return;
+  }
+
+  liveChart = new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: `Téléchargement (${unit})`, data: rx, borderColor: '#3b82f6',
+          backgroundColor: 'rgba(59,130,246,0.15)', fill: true, tension: 0.3, pointRadius: 0 },
+        { label: `Envoi (${unit})`, data: tx, borderColor: '#f59e0b',
+          backgroundColor: 'rgba(245,158,11,0.15)', fill: true, tension: 0.3, pointRadius: 0 },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      scales: {
+        x: { ticks: { color: chartTextColor(), maxTicksLimit: 6 }, grid: { color: chartGridColor() } },
+        y: { ticks: { color: chartTextColor() }, grid: { color: chartGridColor() }, beginAtZero: true },
+      },
+      plugins: { legend: { labels: { color: chartTextColor() } } },
+    },
+  });
 }
 
 async function disconnectDevice(mac, hostname) {
@@ -120,6 +360,8 @@ function refreshAll() {
   loadDevices();
   const histActive = document.querySelector('#tab-history.active');
   if (histActive) loadHistory();
+  const consoActive = document.querySelector('#tab-conso.active');
+  if (consoActive) loadNetworkStats();
 }
 
 /* ── Network Graph — pure canvas 2D, zero external dependency ────────────── */
@@ -163,6 +405,7 @@ let gStars     = [];
 let gHover     = null;
 let gAnimId    = null;
 let gTooltip   = null;
+let gSearchTerm = '';
 
 function nodeR(node) { return node.group === 'router' ? 30 : 20; }
 
@@ -198,6 +441,16 @@ function buildLayout() {
 }
 
 function nodeById(id) { return gNodes.find(n => n.id === id); }
+
+function nodeMatchesSearch(node) {
+  if (!gSearchTerm || node.group === 'router') return true;
+  const hay = `${node.hostname || ''} ${node.ip || ''} ${node.mac || ''}`.toLowerCase();
+  return hay.includes(gSearchTerm);
+}
+
+function filterGraph() {
+  gSearchTerm = document.getElementById('graph-search').value.trim().toLowerCase();
+}
 
 /* ── Drawing ── */
 function drawFrame() {
@@ -253,6 +506,10 @@ function drawNode(ctx, node, hover) {
   const color    = NODE_COLOR[node.group] || NODE_COLOR.inactive;
   const [cr,cg,cb] = hexToRgb(color);
   const {x, y}   = node;
+  const matched  = nodeMatchesSearch(node);
+
+  ctx.save();
+  if (!matched) ctx.globalAlpha = 0.18;
 
   // Glow (always on router, on hover for others)
   if (isRouter || hover) {
@@ -283,6 +540,14 @@ function drawNode(ctx, node, hover) {
     ctx.setLineDash([5, 5]); ctx.stroke(); ctx.setLineDash([]);
   }
 
+  // Search match ring
+  if (matched && gSearchTerm && !isRouter) {
+    ctx.beginPath(); ctx.arc(x, y, R + 6, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(250,204,21,0.95)';
+    ctx.lineWidth   = 2.5;
+    ctx.stroke();
+  }
+
   // Emoji
   const emoji = DEVICE_EMOJI[getNodeIconName(node)] || '📶';
   ctx.font         = `${Math.round(R * (isRouter ? 1.05 : 0.95))}px serif`;
@@ -301,6 +566,8 @@ function drawNode(ctx, node, hover) {
     ctx.fillText(label, x, y + R + 6);
     ctx.shadowBlur   = 0;
   }
+
+  ctx.restore();
 }
 
 /* ── Hit-test ── */
@@ -442,15 +709,16 @@ function closePanel() {
 
 /* ── Table rendering ────────────────────────────────────────────────────── */
 
-function renderLiveTable() {
+function renderLiveTable(devices = liveDevices) {
   const tbody = document.getElementById('live-tbody');
+  const activeDevices = devices.filter(d => d.active);
 
-  if (liveDevices.length === 0) {
+  if (activeDevices.length === 0) {
     tbody.innerHTML = `<tr><td colspan="9"><div class="empty-state">
       <i class="bi bi-wifi-off"></i>Aucun appareil connecté en ce moment</div></td></tr>`;
   } else {
     const rows = [];
-    for (const d of liveDevices) {
+    for (const d of activeDevices) {
       try { rows.push(deviceRow(d)); }
       catch (err) {
         rows.push(`<tr><td colspan="9" class="text-danger small">Erreur sur ${escHtml(String(d?.hostname ?? d?.mac ?? '?'))}</td></tr>`);
@@ -459,6 +727,75 @@ function renderLiveTable() {
     tbody.innerHTML = rows.join('');
   }
   setLiveState('table');
+}
+
+function filterLive() {
+  const q = document.getElementById('live-search').value.toLowerCase();
+  let filtered = q
+    ? liveDevices.filter(d =>
+        String(d.hostname || '').toLowerCase().includes(q) ||
+        String(d.mac      || '').toLowerCase().includes(q) ||
+        String(d.ip       || '').toLowerCase().includes(q))
+    : liveDevices;
+  if (liveSortKey) {
+    filtered = [...filtered].sort((a, b) => liveSortDir * compareValues(a, b, liveSortKey));
+  }
+  renderLiveTable(filtered);
+}
+
+/* ── Sorting ─────────────────────────────────────────────────────────────── */
+
+function compareValues(a, b, key) {
+  if (key === 'ip') {
+    const toNum = (ip) => (ip || '0.0.0.0').split('.')
+      .map(n => parseInt(n, 10) || 0)
+      .reduce((acc, n) => acc * 256 + n, 0);
+    return toNum(a.ip) - toNum(b.ip);
+  }
+  if (key === 'rssi') {
+    const va = a.rssi == null ? -Infinity : a.rssi;
+    const vb = b.rssi == null ? -Infinity : b.rssi;
+    return va - vb;
+  }
+  if (key === 'status') {
+    const rank = (d) => d.is_blocked ? 0 : d.active ? 1 : 2;
+    return rank(a) - rank(b);
+  }
+  if (key === 'status_history') {
+    return (a.is_blocked ? 0 : 1) - (b.is_blocked ? 0 : 1);
+  }
+  const va = String(a[key] ?? '').toLowerCase();
+  const vb = String(b[key] ?? '').toLowerCase();
+  if (va < vb) return -1;
+  if (va > vb) return 1;
+  return 0;
+}
+
+function updateSortIcons(scopeId, key, dir) {
+  document.querySelectorAll(`#${scopeId} .sort-btn`).forEach(btn => {
+    const icon = btn.querySelector('i');
+    if (btn.dataset.key === key) {
+      icon.className = dir === 1 ? 'bi bi-sort-down' : 'bi bi-sort-up';
+      btn.classList.add('active');
+    } else {
+      icon.className = 'bi bi-arrow-down-up';
+      btn.classList.remove('active');
+    }
+  });
+}
+
+function sortLiveTable(key) {
+  if (liveSortKey === key) liveSortDir *= -1;
+  else { liveSortKey = key; liveSortDir = 1; }
+  updateSortIcons('tab-live', liveSortKey, liveSortDir);
+  filterLive();
+}
+
+function sortHistoryTable(key) {
+  if (historySortKey === key) historySortDir *= -1;
+  else { historySortKey = key; historySortDir = 1; }
+  updateSortIcons('tab-history', historySortKey, historySortDir);
+  filterHistory();
 }
 
 function deviceRow(d) {
@@ -473,19 +810,19 @@ function deviceRow(d) {
 
   let actionBtn = '';
   if (d.is_blocked) {
-    actionBtn = `<button class="btn-unblock" onclick="unblockDevice('${esc(d.mac)}')">
-      <i class="bi bi-check-circle me-1"></i>Débloquer</button>`;
+    actionBtn = `<button class="tbl-action-btn tbl-unblock" onclick="unblockDevice('${esc(d.mac)}')" title="Débloquer">
+      <i class="bi bi-check-circle"></i></button>`;
   } else {
     const kickBtn = (d.is_wifi && d.active)
-      ? `<button class="btn-disconnect" onclick="disconnectDevice('${esc(d.mac)}','${esc(d.hostname)}')">
-           <i class="bi bi-wifi-off me-1"></i>Déconnecter</button>` : '';
+      ? `<button class="tbl-action-btn tbl-disconnect" onclick="disconnectDevice('${esc(d.mac)}','${esc(d.hostname)}')" title="Déconnecter">
+           <i class="bi bi-wifi-off"></i></button>` : '';
     const kickBlockBtn = (d.is_wifi && d.active)
-      ? `<button class="btn-kick-block" onclick="kickAndBlock('${esc(d.mac)}','${esc(d.hostname)}')">
-           <i class="bi bi-x-octagon me-1"></i>Kick & Bloquer</button>` : '';
-    actionBtn = `<div class="d-flex gap-1 flex-wrap">
+      ? `<button class="tbl-action-btn tbl-kick-block" onclick="kickAndBlock('${esc(d.mac)}','${esc(d.hostname)}')" title="Kick &amp; Bloquer">
+           <i class="bi bi-x-octagon"></i></button>` : '';
+    actionBtn = `<div class="d-flex gap-1">
       ${kickBtn}${kickBlockBtn}
-      <button class="btn-block" onclick="blockDevice('${esc(d.mac)}','${esc(d.hostname)}')">
-        <i class="bi bi-slash-circle me-1"></i>Bloquer</button>
+      <button class="tbl-action-btn tbl-block" onclick="blockDevice('${esc(d.mac)}','${esc(d.hostname)}')" title="Bloquer">
+        <i class="bi bi-slash-circle"></i></button>
     </div>`;
   }
 
@@ -505,12 +842,12 @@ function deviceRow(d) {
         </div>
       </td>
       <td><code>${d.ip || '—'}</code></td>
-      <td><code>${d.mac || '—'}</code></td>
-      <td class="text-muted small">${fmtDate(d.first_seen)}</td>
-      <td class="text-muted small">${fmtDate(d.last_seen)}</td>
-      <td>${linkBadge}</td>
-      <td>${d.is_wifi ? rssiBadge(d.rssi) : '<span class="text-muted">—</span>'}</td>
-      <td>${statusBadge}</td>
+      <td class="d-none d-md-table-cell"><code>${d.mac || '—'}</code></td>
+      <td class="d-none d-xl-table-cell text-muted small">${fmtDate(d.first_seen)}</td>
+      <td class="d-none d-lg-table-cell text-muted small">${fmtDate(d.last_seen)}</td>
+      <td class="d-none d-sm-table-cell col-narrow">${linkBadge}</td>
+      <td class="d-none d-sm-table-cell col-narrow">${d.is_wifi ? rssiBadge(d.rssi) : '<span class="text-muted">—</span>'}</td>
+      <td class="col-narrow">${statusBadge}</td>
       <td>${actionBtn}</td>
     </tr>`;
 }
@@ -534,10 +871,10 @@ function renderHistoryTable(devices) {
         : `<span class="badge bg-secondary-subtle text-secondary">Hors ligne</span>`;
 
     const actionBtn = d.is_blocked
-      ? `<button class="btn-unblock" onclick="unblockDevice('${esc(d.mac)}')">
-           <i class="bi bi-check-circle me-1"></i>Débloquer</button>`
-      : `<button class="btn-block" onclick="blockDevice('${esc(d.mac)}','${esc(d.hostname || d.mac)}')">
-           <i class="bi bi-slash-circle me-1"></i>Bloquer</button>`;
+      ? `<button class="tbl-action-btn tbl-unblock" onclick="unblockDevice('${esc(d.mac)}')" title="Débloquer">
+           <i class="bi bi-check-circle"></i></button>`
+      : `<button class="tbl-action-btn tbl-block" onclick="blockDevice('${esc(d.mac)}','${esc(d.hostname || d.mac)}')" title="Bloquer">
+           <i class="bi bi-slash-circle"></i></button>`;
 
     return `
       <tr>
@@ -548,10 +885,10 @@ function renderHistoryTable(devices) {
           </div>
         </td>
         <td><code>${d.ip || '—'}</code></td>
-        <td><code>${d.mac || '—'}</code></td>
-        <td class="text-muted small">${fmtDate(d.first_seen)}</td>
-        <td class="text-muted small">${fmtDate(d.last_seen)}</td>
-        <td>${status}</td>
+        <td class="d-none d-md-table-cell"><code>${d.mac || '—'}</code></td>
+        <td class="d-none d-lg-table-cell text-muted small">${fmtDate(d.first_seen)}</td>
+        <td class="d-none d-sm-table-cell text-muted small">${fmtDate(d.last_seen)}</td>
+        <td class="col-narrow">${status}</td>
         <td>${actionBtn}</td>
       </tr>`;
   }).join('');
@@ -559,12 +896,15 @@ function renderHistoryTable(devices) {
 
 function filterHistory() {
   const q = document.getElementById('history-search').value.toLowerCase();
-  const filtered = q
+  let filtered = q
     ? historyDevices.filter(d =>
         String(d.hostname || '').toLowerCase().includes(q) ||
         String(d.mac      || '').toLowerCase().includes(q) ||
         String(d.ip       || '').toLowerCase().includes(q))
     : historyDevices;
+  if (historySortKey) {
+    filtered = [...filtered].sort((a, b) => historySortDir * compareValues(a, b, historySortKey));
+  }
   renderHistoryTable(filtered);
 }
 
@@ -585,8 +925,10 @@ function setHistoryState(state) {
 
 function updateStats(data) {
   if (data.devices      != null) {
-    document.getElementById('stat-connected').textContent = data.devices.length;
-    document.getElementById('badge-live').textContent = data.devices.length || '';
+    const activeCount = data.devices.filter(d => d.active).length;
+    document.getElementById('stat-connected').textContent = activeCount;
+    document.getElementById('stat-known').textContent     = data.devices.length;
+    document.getElementById('badge-live').textContent = activeCount || '';
   }
   if (data.blocked_count != null)
     document.getElementById('stat-blocked').textContent = data.blocked_count;

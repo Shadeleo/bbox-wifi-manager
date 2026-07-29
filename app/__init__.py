@@ -18,8 +18,9 @@ def create_app() -> Flask:
     from .db import init_db
     init_db()
 
-    from .routes import bp
+    from .routes import bp, start_network_poller
     app.register_blueprint(bp)
+    start_network_poller()
 
     @app.after_request
     def _security_headers(response):
