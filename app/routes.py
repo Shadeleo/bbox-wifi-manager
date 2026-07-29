@@ -28,6 +28,12 @@ _active_creds = {
     "password": os.getenv("BBOX_PASSWORD", ""),
 }
 
+# Limite de tentatives de connexion par IP (l'app écoute sur le réseau WiFi,
+# pas seulement en local — on bloque le bruteforce du mot de passe Bbox).
+_login_attempts: dict[str, list[float]] = {}
+_LOGIN_MAX_ATTEMPTS = 5
+_LOGIN_WINDOW_SECONDS = 300
+
 
 def _client() -> BboxClient:
     """Client Bbox authentifié, réutilisant la session mise en cache (évite de
@@ -72,6 +78,17 @@ def login_page():
 
 @bp.post("/login")
 def do_login():
+    client_ip = request.remote_addr or "unknown"
+    now = time.time()
+    recent = [t for t in _login_attempts.get(client_ip, []) if now - t < _LOGIN_WINDOW_SECONDS]
+    if len(recent) >= _LOGIN_MAX_ATTEMPTS:
+        wait_min = int((_LOGIN_WINDOW_SECONDS - (now - recent[0])) / 60) + 1
+        return render_template(
+            "login.html",
+            error=f"Trop de tentatives échouées. Réessaie dans {wait_min} min.",
+        )
+    _login_attempts[client_ip] = recent
+
     host     = request.form.get("host", "192.168.1.254").strip()
     password = request.form.get("password", "").strip()
     try:
@@ -88,8 +105,10 @@ def do_login():
         session["bbox_password"] = password
         _active_creds["host"]     = host
         _active_creds["password"] = password
+        _login_attempts.pop(client_ip, None)
         return redirect(url_for("main.index"))
     except Exception as exc:
+        _login_attempts.setdefault(client_ip, []).append(now)
         return render_template("login.html", error=str(exc))
 
 
