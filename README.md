@@ -1,5 +1,7 @@
 # Bbox WiFi Manager
 
+<img width="987" height="1227" alt="image" src="https://github.com/user-attachments/assets/48ff3b7f-471d-4558-a769-cffd72d9c491" />
+
 Interface web locale pour piloter les appareils connectés à une **Bbox Bouygues Telecom**
 (testé sur *F@st5688b*, firmware 25.x).
 
