@@ -47,23 +47,28 @@ def upsert_device(
 ) -> None:
     now = datetime.now().isoformat(sep=" ", timespec="seconds")
     fs = first_seen or now
-    ls = last_seen or now
     with _connect() as conn:
         exists = conn.execute(
-            "SELECT first_seen FROM devices WHERE mac = ?", (mac,)
+            "SELECT first_seen, last_seen FROM devices WHERE mac = ?", (mac,)
         ).fetchone()
         if exists:
             # Conserve la date de première connexion la plus ancienne
             stored_fs = exists["first_seen"]
             final_fs = stored_fs if stored_fs < fs else fs
+            # last_seen inconnu (sentinelle '-1' de la box pour un hôte hors
+            # ligne) : on garde la valeur en base plutôt que de dater à
+            # l'instant un appareil parti depuis des mois.
+            final_ls = last_seen if last_seen is not None else exists["last_seen"]
             conn.execute(
                 "UPDATE devices SET hostname = ?, ip = ?, first_seen = ?, last_seen = ? WHERE mac = ?",
-                (hostname, ip, final_fs, ls, mac),
+                (hostname, ip, final_fs, final_ls, mac),
             )
         else:
+            # Rien en base : à défaut de dernière connexion connue, la
+            # première connexion est le seul fait avéré.
             conn.execute(
                 "INSERT INTO devices (mac, hostname, ip, first_seen, last_seen) VALUES (?,?,?,?,?)",
-                (mac, hostname, ip, fs, ls),
+                (mac, hostname, ip, fs, last_seen or fs),
             )
 
 

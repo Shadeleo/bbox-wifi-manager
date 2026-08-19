@@ -124,12 +124,26 @@ def login_required(f):
     return decorated
 
 
-def _calc_last_seen(lastseen_secs: int | None) -> str | None:
-    if lastseen_secs is None:
+def _calc_last_seen(lastseen_secs) -> str | None:
+    """Traduit le champ `lastseen` de la box en horodatage.
+
+    La box mélange les types : un entier de secondes écoulées pour la plupart
+    des hôtes, mais la chaîne '-1' pour un hôte hors ligne dont elle a perdu
+    la trace. '-1' est une sentinelle « inconnu », pas une durée : la
+    soustraire daterait l'appareil dans le futur.
+
+    Toute valeur négative ou inexploitable donne None ; l'appelant retombe
+    alors sur l'historique en base plutôt que d'inventer une date.
+    """
+    try:
+        secondes = int(lastseen_secs)
+    except (TypeError, ValueError):
         return None
-    if lastseen_secs == 0:
+    if secondes < 0:
+        return None
+    if secondes == 0:
         return datetime.now().isoformat(sep=" ", timespec="seconds")
-    return (datetime.now() - timedelta(seconds=lastseen_secs)).isoformat(
+    return (datetime.now() - timedelta(seconds=secondes)).isoformat(
         sep=" ", timespec="seconds"
     )
 

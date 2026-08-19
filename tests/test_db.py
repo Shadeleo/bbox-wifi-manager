@@ -74,3 +74,25 @@ def test_purge_des_statistiques_au_dela_de_30_jours():
     points = db.get_network_stats(hours=24 * 400)
     assert len(points) == 1
     assert points[0]["rx_bytes"] == 2
+
+
+def test_last_seen_inconnu_ne_remplace_pas_la_valeur_en_base():
+    """La box renvoie '-1' (inconnu) pour un hôte hors ligne.
+
+    Traduit en None par _calc_last_seen, il ne doit pas devenir « maintenant » :
+    ça daterait à l'instant un appareil qui n'est plus là depuis des mois.
+    """
+    mac = "AA:BB:CC:DD:EE:42"
+    db.upsert_device(mac, "hors-ligne", "192.168.1.99",
+                     first_seen="2026-01-01 08:00:00", last_seen="2026-02-03 09:30:00")
+
+    db.upsert_device(mac, "hors-ligne", "", first_seen="2026-01-01 08:00:00", last_seen=None)
+
+    assert _appareils_par_mac()[mac]["last_seen"] == "2026-02-03 09:30:00"
+
+
+def test_last_seen_inconnu_sur_un_appareil_inedit():
+    """Aucune valeur en base : la première connexion est le seul fait avéré."""
+    mac = "AA:BB:CC:DD:EE:43"
+    db.upsert_device(mac, "inedit", "", first_seen="2026-01-01 08:00:00", last_seen=None)
+    assert _appareils_par_mac()[mac]["last_seen"] == "2026-01-01 08:00:00"
