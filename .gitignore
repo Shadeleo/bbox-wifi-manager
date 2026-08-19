@@ -2,6 +2,7 @@
 .env
 *.env
 .env.*
+!.env.example
 
 # Base de données locale
 data/
@@ -26,6 +27,10 @@ env/
 # Logs
 *.log
 logs/
+
+# Tests / lint
+.pytest_cache/
+.ruff_cache/
 
 # IDE / outils
 .vscode/

@@ -7,7 +7,7 @@ import urllib.parse
 import requests
 import urllib3
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from . import config
 
 log = logging.getLogger(__name__)
 
@@ -16,11 +16,20 @@ class BboxClient:
     # Fréquences WiFi reconnues par l'API Bbox
     _WIFI_LINKS = {"wifi", "wireless"}
 
-    def __init__(self, host: str, password: str) -> None:
+    def __init__(self, host: str, password: str, verify_tls: bool | None = None) -> None:
         self.api_url = f"http://{host}/api/v1"
         self.password = password
         self.session = requests.Session()
         self._authenticated = False
+        # Le mot de passe transite par https://mabbox.bytel.fr lors de l'auth :
+        # la vérification du certificat y est active par défaut.
+        self.verify_tls = config.verify_tls() if verify_tls is None else verify_tls
+        if not self.verify_tls:
+            log.warning(
+                "Vérification TLS désactivée (BBOX_VERIFY_TLS=0) : le mot de passe "
+                "est exposé à une interception lors de l'authentification Bytel."
+            )
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     # ── Authentification ──────────────────────────────────────────────────
 
@@ -48,7 +57,8 @@ class BboxClient:
 
         # Étape 2 : POST vers Bytel → reçoit le cookie BBOX_ID
         r2 = self.session.post(bytel_url, data=body, headers=hdrs,
-                               allow_redirects=False, timeout=20)
+                               allow_redirects=False, timeout=20,
+                               verify=self.verify_tls)
         if r2.status_code not in (200, 204):
             raise RuntimeError(
                 f"Authentification Bytel échouée (HTTP {r2.status_code})"
@@ -113,7 +123,7 @@ class BboxClient:
         if r.status_code in (301, 302, 303, 307, 308):
             redirect_url = r.headers.get("Location", "")
             log.debug("  redirect → %s", redirect_url[:80])
-            r_kwargs: dict = {"allow_redirects": False, "timeout": 20, "verify": False}
+            r_kwargs: dict = {"allow_redirects": False, "timeout": 20, "verify": self.verify_tls}
             if method.upper() != "DELETE":
                 r_kwargs["data"] = body
                 r_kwargs["headers"] = hdrs
@@ -239,7 +249,13 @@ class BboxClient:
             self._put("/parentalcontrol", {"enable": "0"})
 
     def disconnect_mac(self, mac: str) -> None:
-        """Expulse un appareil WiFi via la meilleure méthode disponible."""
+        """Expulse un appareil WiFi via la meilleure méthode disponible.
+
+        ATTENTION : si la première tentative (DELETE /hosts/{id}) échoue, le
+        repli coupe et rallume la radio de toute la bande WiFi concernée. Cela
+        déconnecte brièvement *tous* les appareils de cette bande, pas
+        seulement la cible.
+        """
         mac_norm = mac.upper()
 
         # Récupère les infos de l'hôte (id entier + bande WiFi)

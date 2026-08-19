@@ -1,0 +1,20 @@
+[project]
+name = "bbox-wifi-manager"
+version = "1.0.0"
+description = "Interface web locale pour piloter les appareils connectés à une Bbox Bouygues Telecom"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+exclude = [".venv", "venv", "data", "__pycache__"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

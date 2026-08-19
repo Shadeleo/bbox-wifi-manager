@@ -687,16 +687,16 @@ function showDevicePanel(node) {
 
   let actions = '';
   if (node.is_blocked) {
-    actions = `<button class="btn-unblock w-100" onclick="unblockDevice('${esc(node.mac)}')">
+    actions = `<button class="btn-unblock w-100" onclick="unblockDevice('${escAttrJs(node.mac)}')">
       <i class="bi bi-check-circle me-1"></i>Débloquer</button>`;
   } else {
     if (node.is_wifi && node.active) {
-      actions += `<button class="btn-disconnect w-100 mb-2" onclick="disconnectDevice('${esc(node.mac)}','${esc(node.hostname)}')">
+      actions += `<button class="btn-disconnect w-100 mb-2" onclick="disconnectDevice('${escAttrJs(node.mac)}','${escAttrJs(node.hostname)}')">
         <i class="bi bi-wifi-off me-1"></i>Déconnecter</button>`;
-      actions += `<button class="btn-kick-block w-100 mb-2" onclick="kickAndBlock('${esc(node.mac)}','${esc(node.hostname)}')">
+      actions += `<button class="btn-kick-block w-100 mb-2" onclick="kickAndBlock('${escAttrJs(node.mac)}','${escAttrJs(node.hostname)}')">
         <i class="bi bi-x-octagon me-1"></i>Kick & Bloquer</button>`;
     }
-    actions += `<button class="btn-block w-100" onclick="blockDevice('${esc(node.mac)}','${esc(node.hostname)}')">
+    actions += `<button class="btn-block w-100" onclick="blockDevice('${escAttrJs(node.mac)}','${escAttrJs(node.hostname)}')">
       <i class="bi bi-slash-circle me-1"></i>Bloquer</button>`;
   }
   document.getElementById('panel-actions').innerHTML = actions;
@@ -810,18 +810,18 @@ function deviceRow(d) {
 
   let actionBtn = '';
   if (d.is_blocked) {
-    actionBtn = `<button class="tbl-action-btn tbl-unblock" onclick="unblockDevice('${esc(d.mac)}')" title="Débloquer">
+    actionBtn = `<button class="tbl-action-btn tbl-unblock" onclick="unblockDevice('${escAttrJs(d.mac)}')" title="Débloquer">
       <i class="bi bi-check-circle"></i></button>`;
   } else {
     const kickBtn = (d.is_wifi && d.active)
-      ? `<button class="tbl-action-btn tbl-disconnect" onclick="disconnectDevice('${esc(d.mac)}','${esc(d.hostname)}')" title="Déconnecter">
+      ? `<button class="tbl-action-btn tbl-disconnect" onclick="disconnectDevice('${escAttrJs(d.mac)}','${escAttrJs(d.hostname)}')" title="Déconnecter">
            <i class="bi bi-wifi-off"></i></button>` : '';
     const kickBlockBtn = (d.is_wifi && d.active)
-      ? `<button class="tbl-action-btn tbl-kick-block" onclick="kickAndBlock('${esc(d.mac)}','${esc(d.hostname)}')" title="Kick &amp; Bloquer">
+      ? `<button class="tbl-action-btn tbl-kick-block" onclick="kickAndBlock('${escAttrJs(d.mac)}','${escAttrJs(d.hostname)}')" title="Kick &amp; Bloquer">
            <i class="bi bi-x-octagon"></i></button>` : '';
     actionBtn = `<div class="d-flex gap-1">
       ${kickBtn}${kickBlockBtn}
-      <button class="tbl-action-btn tbl-block" onclick="blockDevice('${esc(d.mac)}','${esc(d.hostname)}')" title="Bloquer">
+      <button class="tbl-action-btn tbl-block" onclick="blockDevice('${escAttrJs(d.mac)}','${escAttrJs(d.hostname)}')" title="Bloquer">
         <i class="bi bi-slash-circle"></i></button>
     </div>`;
   }
@@ -871,9 +871,9 @@ function renderHistoryTable(devices) {
         : `<span class="badge bg-secondary-subtle text-secondary">Hors ligne</span>`;
 
     const actionBtn = d.is_blocked
-      ? `<button class="tbl-action-btn tbl-unblock" onclick="unblockDevice('${esc(d.mac)}')" title="Débloquer">
+      ? `<button class="tbl-action-btn tbl-unblock" onclick="unblockDevice('${escAttrJs(d.mac)}')" title="Débloquer">
            <i class="bi bi-check-circle"></i></button>`
-      : `<button class="tbl-action-btn tbl-block" onclick="blockDevice('${esc(d.mac)}','${esc(d.hostname || d.mac)}')" title="Bloquer">
+      : `<button class="tbl-action-btn tbl-block" onclick="blockDevice('${escAttrJs(d.mac)}','${escAttrJs(d.hostname || d.mac)}')" title="Bloquer">
            <i class="bi bi-slash-circle"></i></button>`;
 
     return `
@@ -998,8 +998,21 @@ function escHtml(s) {
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-function esc(s) {
+/* Echappe une valeur destinee a un litteral de chaine JS place DANS un
+   attribut HTML, par exemple onclick="fn('${escAttrJs(v)}')".
+   Le parseur HTML decode les entites AVANT que JS ne lise la chaine : une
+   apostrophe encodee en &#39; y redeviendrait une vraie apostrophe et
+   refermerait le litteral. On echappe donc la quote a la mode JS (\'),
+   et seulement le reste a la mode HTML.
+   Pour du texte affiche, utiliser escHtml. */
+function escAttrJs(s) {
   return String(s ?? '')
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    .replace(/\\/g, '\\\\')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, "\\'")
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n');
 }

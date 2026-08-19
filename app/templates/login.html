@@ -29,10 +29,10 @@
 
         <p class="field-label">Votre box</p>
         <div class="box-grid">
-          <div class="box-card active" onclick="selectBox(this, '192.168.1.254')">
+          <div class="box-card active" onclick="selectBox(this, '{{ default_host }}')">
             <i class="bi bi-router"></i>
             <div class="box-name">Bbox Bouygues</div>
-            <div class="box-addr">192.168.1.254</div>
+            <div class="box-addr">{{ default_host }}</div>
           </div>
           <div class="box-card" onclick="selectBox(this, 'custom')">
             <i class="bi bi-pencil-square"></i>
@@ -40,7 +40,7 @@
             <div class="box-addr">IP manuelle</div>
           </div>
         </div>
-        <input type="hidden" name="host" id="host-val" value="192.168.1.254" />
+        <input type="hidden" name="host" id="host-val" value="{{ default_host }}" />
         <input type="text" id="custom-ip" class="form-control mt-3 d-none"
                placeholder="Ex : 192.168.0.1"
                oninput="document.getElementById('host-val').value = this.value.trim()" />

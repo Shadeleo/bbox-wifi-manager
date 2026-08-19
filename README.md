@@ -29,12 +29,15 @@ rien envoyer à l'extérieur.
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Utilisation](#utilisation)
+  - [En production](#en-production)
+  - [Développement](#développement)
 - [Architecture](#architecture)
 - [Référence API](#référence-api)
 - [Comment fonctionne le blocage](#comment-fonctionne-le-blocage)
 - [Sécurité](#sécurité)
 - [Dépannage](#dépannage)
 - [Avertissement](#avertissement)
+- [Licence](#licence)
 
 ---
 
@@ -122,12 +125,23 @@ BBOX_PASSWORD=ton_mot_de_passe_admin
 |---|---|---|
 | `BBOX_HOST` | `192.168.1.254` | IP locale de la box |
 | `BBOX_PASSWORD` | *(vide)* | Mot de passe admin, utilisé par le collecteur d'arrière-plan |
+| `APP_ENV` | `development` | `production` active le serveur waitress et rend `SECRET_KEY` obligatoire |
 | `SECRET_KEY` | aléatoire au démarrage | Clé de signature des sessions Flask |
 | `PORT` | `5000` | Port d'écoute du serveur |
+| `LOG_LEVEL` | `INFO` | `DEBUG` journalise les corps de requêtes et les jetons CSRF |
+| `BBOX_VERIFY_TLS` | `1` | Vérification du certificat lors de l'authentification Bytel |
+| `SESSION_COOKIE_SECURE` | `0` | À passer à `1` uniquement derrière un reverse-proxy HTTPS |
+| `ENABLE_POLLER` | `1` | Collecte périodique de la consommation WAN |
 
 > **Sans `SECRET_KEY` fixe, une clé aléatoire est générée à chaque lancement : toutes les
 > sessions ouvertes sont invalidées au redémarrage.** Définissez-la pour éviter d'avoir à
-> vous reconnecter.
+> vous reconnecter. En `APP_ENV=production`, son absence empêche le démarrage.
+
+Générer une clé :
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+```
 
 Le fichier `.env` est ignoré par Git — il ne doit jamais être commité.
 
@@ -144,6 +158,38 @@ mot de passe admin de la box (l'IP est pré-remplie, modifiable si votre box est
 
 Le serveur écoute sur `0.0.0.0` : l'interface est donc **accessible depuis tout votre
 réseau local**, pas seulement depuis la machine hôte. Voir [Sécurité](#sécurité).
+
+### En production
+
+Passez `APP_ENV=production` : `run.py` sert alors l'application avec **waitress** au lieu
+du serveur de développement Werkzeug, qui n'est pas prévu pour ça.
+
+```dotenv
+APP_ENV=production
+SECRET_KEY=<votre clé>
+LOG_LEVEL=INFO
+```
+
+```bash
+python run.py
+```
+
+En conteneur, la box doit rester joignable sur le réseau local :
+
+```bash
+docker build -t bbox-wifi-manager .
+docker run --rm --network host --env-file .env -v "$PWD/data:/app/data" bbox-wifi-manager
+```
+
+### Développement
+
+```bash
+pip install -r requirements-dev.txt
+
+pytest                        # tests Python
+ruff check .                  # lint
+node tests/escaping.test.mjs  # échappement côté client
+```
 
 ---
 
@@ -248,24 +294,38 @@ l'appareil visé.
 
 Mesures en place :
 
-- Cookies de session `HttpOnly` + `SameSite=Lax`, durée de vie 8 h
-- En-têtes `X-Content-Type-Options: nosniff` et `X-Frame-Options: SAMEORIGIN`
+- **Le mot de passe de la box ne transite jamais dans le cookie de session.** Les sessions
+  Flask sont signées mais *non chiffrées* : le mot de passe est conservé côté serveur, dans
+  un magasin en mémoire indexé par un identifiant opaque, seul présent dans le cookie. Un
+  redémarrage vide ce magasin et force une reconnexion.
+- `SECRET_KEY` obligatoire en `APP_ENV=production` : refus de démarrer sans.
+- Vérification TLS **active par défaut** sur l'authentification Bytel, où transite le mot
+  de passe (`BBOX_VERIFY_TLS`).
+- Cookies de session `HttpOnly` + `SameSite=Lax`, durée de vie 8 h, `Secure` activable
+- En-têtes `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`,
+  `Referrer-Policy: same-origin`
 - Limitation des tentatives de connexion : **5 échecs par IP par tranche de 5 minutes**
 - Validation de l'adresse IP saisie (rejet des adresses de bouclage)
-- Échappement des données côté client pour prévenir les injections XSS
-- Cache d'assets borné à 200 entrées
+- Échappement des données côté client, adapté au contexte d'insertion (texte HTML *vs*
+  littéral JS dans un attribut), vérifié par `tests/escaping.test.mjs`
+- Proxy vers la box : rejet des chemins de traversée et des URL absolues
+- Cache d'assets borné à 200 entrées, avec expiration au bout d'une heure
+- Messages d'erreur d'API génériques en production (les détails restent dans les journaux)
 
 Points de vigilance :
 
 - Le serveur écoute sur `0.0.0.0` — **toute machine du réseau local peut atteindre la page
   de connexion**. Passez `host="127.0.0.1"` dans [run.py](run.py) pour restreindre à la
   machine hôte.
-- Le mot de passe de la box est conservé en session Flask et en mémoire du processus (pour
-  le collecteur d'arrière-plan).
+- Le mot de passe reste en mémoire du processus, y compris pour le collecteur
+  d'arrière-plan qui tourne hors de toute session HTTP.
 - Le trafic est en **HTTP en clair** : à réserver à un réseau domestique de confiance,
   jamais à exposer sur internet.
-- La vérification TLS est désactivée sur les redirections vers Bytel (`verify=False`),
-  la box présentant un certificat auto-signé.
+- Le magasin de mots de passe et la limitation de tentatives sont **par processus** : avec
+  plusieurs workers, chacun a les siens.
+- **« Déconnecter » peut couper toute une bande WiFi.** Si l'expulsion ciblée échoue, le
+  repli éteint puis rallume la radio de la bande concernée, ce qui déconnecte brièvement
+  *tous* les appareils qui y sont rattachés.
 
 ---
 
@@ -275,7 +335,7 @@ Points de vigilance :
 |---|---|
 | « Authentification Bytel échouée » | Vérifiez le mot de passe admin et la connectivité internet de la box — l'étape 2 passe par le cloud Bytel. |
 | « Pas de redirection vers Bytel reçue » | Firmware différent : la box n'utilise probablement pas le flux d'auth cloud. |
-| Le blocage reste sans effet | Les chemins de contrôle parental varient d'un firmware à l'autre. Lancez avec les logs `DEBUG` (déjà actifs) pour voir les codes de retour. |
+| Le blocage reste sans effet | Les chemins de contrôle parental varient d'un firmware à l'autre. Lancez avec `LOG_LEVEL=DEBUG` pour voir les codes de retour. |
 | Onglet « Interface Bbox » vide | Ouvrez la console du navigateur : une ressource peut échapper à la réécriture d'URL du proxy. |
 | Graphique de consommation vide | Le collecteur relève un point toutes les 5 min — comptez un premier délai avant l'apparition des données. |
 | Reconnexion demandée à chaque redémarrage | Définissez `SECRET_KEY` dans `.env`. |
@@ -290,3 +350,11 @@ mise à jour du firmware.
 
 À n'utiliser que sur **votre propre box**, pour administrer **votre propre réseau**.
 Fourni tel quel, sans garantie.
+
+---
+
+## Licence
+
+[MIT](LICENSE) — © 2026 Leo Nouhaud.
+
+Vulnérabilité à signaler : voir [SECURITY.md](SECURITY.md).

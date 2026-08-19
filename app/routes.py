@@ -1,16 +1,26 @@
 import ipaddress
 import logging
-import os
+import re
+import secrets
+import threading
 import time
 from datetime import datetime, timedelta
 from functools import wraps
 
-import re
-import threading
 import requests as _req
-from flask import Blueprint, jsonify, redirect, render_template, request, session, url_for, Response
 from dotenv import load_dotenv
+from flask import (
+    Blueprint,
+    Response,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    session,
+    url_for,
+)
 
+from . import config
 from .bbox import BboxClient
 from .db import get_all_devices, get_network_stats, insert_network_stat, set_blocked, upsert_device
 
@@ -24,9 +34,16 @@ bp = Blueprint("main", __name__)
 # session Flask en dehors d'une requête HTTP). Pré-remplis depuis .env, mis à
 # jour à chaque connexion réussie via do_login().
 _active_creds = {
-    "host":     os.getenv("BBOX_HOST", "192.168.1.254"),
-    "password": os.getenv("BBOX_PASSWORD", ""),
+    "host":     config.bbox_host(),
+    "password": config.bbox_password(),
 }
+
+# Magasin de mots de passe côté serveur. Les sessions Flask sont signées mais
+# NON chiffrées : y placer le mot de passe de la box le rendrait lisible par
+# quiconque possède le cookie. Seul un identifiant opaque transite dans la
+# session ; le mot de passe reste ici, en mémoire du processus.
+_cred_store: dict[str, str] = {}
+_cred_lock = threading.Lock()
 
 # Limite de tentatives de connexion par IP (l'app écoute sur le réseau WiFi,
 # pas seulement en local — on bloque le bruteforce du mot de passe Bbox).
@@ -35,11 +52,58 @@ _LOGIN_MAX_ATTEMPTS = 5
 _LOGIN_WINDOW_SECONDS = 300
 
 
+def _store_password(password: str) -> str:
+    """Enregistre le mot de passe côté serveur, retourne son identifiant opaque."""
+    cred_id = secrets.token_urlsafe(32)
+    with _cred_lock:
+        _cred_store[cred_id] = password
+    return cred_id
+
+
+def _has_creds() -> bool:
+    cred_id = session.get("cred_id")
+    if not cred_id:
+        return False
+    with _cred_lock:
+        return cred_id in _cred_store
+
+
+def _session_password() -> str:
+    cred_id = session.get("cred_id")
+    if not cred_id:
+        return config.bbox_password()
+    with _cred_lock:
+        return _cred_store.get(cred_id, config.bbox_password())
+
+
+def _forget_password() -> None:
+    cred_id = session.get("cred_id")
+    if cred_id:
+        with _cred_lock:
+            _cred_store.pop(cred_id, None)
+
+
+def _session_host() -> str:
+    return session.get("bbox_host") or config.bbox_host()
+
+
+def _render_login(**kwargs):
+    return render_template("login.html", default_host=config.bbox_host(), **kwargs)
+
+
+def _api_error(exc: Exception, status: int = 500):
+    """Erreur API : détaillée en développement, générique en production."""
+    log.exception("Erreur API : %s", exc)
+    if config.is_production():
+        return jsonify({"error": "Erreur interne — consultez les journaux du serveur."}), status
+    return jsonify({"error": str(exc)}), status
+
+
 def _client() -> BboxClient:
     """Client Bbox authentifié, réutilisant la session mise en cache (évite de
     refaire le handshake Bbox+Bytel à chaque appel API)."""
-    host = session.get("bbox_host", os.getenv("BBOX_HOST", "192.168.1.254"))
-    password = session.get("bbox_password", os.getenv("BBOX_PASSWORD", ""))
+    host = _session_host()
+    password = _session_password()
     client = BboxClient(host=host, password=password)
     client.session = _get_bbox_session(host, password)
     client._authenticated = True
@@ -49,7 +113,10 @@ def _client() -> BboxClient:
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not session.get("authenticated"):
+        # _has_creds() : après un redémarrage le magasin est vide, le cookie
+        # seul ne suffit plus — on force une reconnexion.
+        if not session.get("authenticated") or not _has_creds():
+            session.clear()
             if request.path.startswith("/api/"):
                 return jsonify({"error": "Non authentifié", "redirect": "/login"}), 401
             return redirect(url_for("main.login_page"))
@@ -73,47 +140,55 @@ def _calc_last_seen(lastseen_secs: int | None) -> str | None:
 def login_page():
     if session.get("authenticated"):
         return redirect(url_for("main.index"))
-    return render_template("login.html")
+    return _render_login()
 
 
 @bp.post("/login")
 def do_login():
     client_ip = request.remote_addr or "unknown"
     now = time.time()
+    # Purge les IP dont la fenêtre est expirée : sans ça le dict croît sans fin.
+    for ip_addr, stamps in list(_login_attempts.items()):
+        if all(now - t >= _LOGIN_WINDOW_SECONDS for t in stamps):
+            _login_attempts.pop(ip_addr, None)
+
     recent = [t for t in _login_attempts.get(client_ip, []) if now - t < _LOGIN_WINDOW_SECONDS]
     if len(recent) >= _LOGIN_MAX_ATTEMPTS:
         wait_min = int((_LOGIN_WINDOW_SECONDS - (now - recent[0])) / 60) + 1
-        return render_template(
-            "login.html",
+        return _render_login(
             error=f"Trop de tentatives échouées. Réessaie dans {wait_min} min.",
         )
     _login_attempts[client_ip] = recent
 
-    host     = request.form.get("host", "192.168.1.254").strip()
+    host     = request.form.get("host", config.DEFAULT_BBOX_HOST).strip()
     password = request.form.get("password", "").strip()
     try:
         ip = ipaddress.ip_address(host)
         if ip.is_loopback:
-            return render_template("login.html", error="Adresse IP invalide")
+            return _render_login(error="Adresse IP invalide")
     except ValueError:
-        return render_template("login.html", error="Adresse IP invalide (ex : 192.168.1.254)")
+        return _render_login(
+            error=f"Adresse IP invalide (ex : {config.DEFAULT_BBOX_HOST})"
+        )
     try:
         client = BboxClient(host=host, password=password)
         client.login()
         session["authenticated"] = True
         session["bbox_host"]     = host
-        session["bbox_password"] = password
+        # Le mot de passe reste côté serveur : la session ne porte qu'un jeton.
+        session["cred_id"]       = _store_password(password)
         _active_creds["host"]     = host
         _active_creds["password"] = password
         _login_attempts.pop(client_ip, None)
         return redirect(url_for("main.index"))
     except Exception as exc:
         _login_attempts.setdefault(client_ip, []).append(now)
-        return render_template("login.html", error=str(exc))
+        return _render_login(error=str(exc))
 
 
 @bp.post("/logout")
 def logout():
+    _forget_password()
     session.clear()
     return redirect(url_for("main.login_page"))
 
@@ -192,7 +267,7 @@ def api_devices():
         return jsonify({"devices": devices, "blocked_count": blocked_count})
 
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        return _api_error(exc)
 
 
 @bp.get("/api/history")
@@ -201,7 +276,7 @@ def api_history():
     try:
         return jsonify({"devices": get_all_devices()})
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        return _api_error(exc)
 
 
 def _get_device_activity() -> list[dict]:
@@ -259,7 +334,7 @@ def api_network_stats_live():
             "activity": activity,
         })
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        return _api_error(exc)
 
 
 @bp.get("/api/network-stats")
@@ -290,7 +365,7 @@ def api_network_stats():
             "activity": activity,
         })
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        return _api_error(exc)
 
 
 @bp.post("/api/disconnect")
@@ -303,7 +378,7 @@ def api_disconnect():
         client.disconnect_mac(mac)
         return jsonify({"ok": True})
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        return _api_error(exc)
 
 
 @bp.post("/api/block")
@@ -318,7 +393,7 @@ def api_block():
         set_blocked(mac, True)
         return jsonify({"ok": True})
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        return _api_error(exc)
 
 
 @bp.delete("/api/block")
@@ -331,7 +406,7 @@ def api_unblock():
         set_blocked(mac, False)
         return jsonify({"ok": True})
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        return _api_error(exc)
 
 
 @bp.post("/api/kick-and-block")
@@ -350,7 +425,7 @@ def api_kick_and_block():
         set_blocked(mac, True)
         return jsonify({"ok": True})
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        return _api_error(exc)
 
 
 # ── Bbox proxy ────────────────────────────────────────────────────────────────
@@ -369,9 +444,47 @@ _SKIP_REQUEST_HEADERS = {
 _authed_sessions: dict[str, _req.Session] = {}
 _sessions_lock = threading.Lock()
 
-_asset_cache: dict[str, tuple[bytes, str, int]] = {}  # path → (body, content_type, status)
+_asset_cache: dict[str, tuple[bytes, str, int, float]] = {}  # path → (body, type, status, ts)
 _CACHEABLE_EXT = (".js", ".css", ".png", ".svg", ".woff", ".woff2", ".ttf", ".ico", ".webp", ".jpg", ".jpeg", ".gif")
 _MAX_CACHE_ENTRIES = 200
+_ASSET_CACHE_TTL = 3600  # 1 h — sans expiration, un asset périmé après mise à jour
+                         # du firmware serait servi indéfiniment.
+
+
+def _cache_key(path: str) -> str:
+    return path.split("?")[0]
+
+
+def _is_cacheable(path: str) -> bool:
+    return request.method == "GET" and _cache_key(path).endswith(_CACHEABLE_EXT)
+
+
+def _cache_get(path: str) -> tuple[bytes, str, int] | None:
+    entry = _asset_cache.get(_cache_key(path))
+    if entry is None:
+        return None
+    body, content_type, status, stored_at = entry
+    if time.monotonic() - stored_at >= _ASSET_CACHE_TTL:
+        _asset_cache.pop(_cache_key(path), None)
+        return None
+    return body, content_type, status
+
+
+def _cache_put(path: str, body: bytes, content_type: str, status: int) -> None:
+    now = time.monotonic()
+    if len(_asset_cache) >= _MAX_CACHE_ENTRIES:
+        for key, entry in list(_asset_cache.items()):
+            if now - entry[3] >= _ASSET_CACHE_TTL:
+                _asset_cache.pop(key, None)
+    if len(_asset_cache) < _MAX_CACHE_ENTRIES:
+        _asset_cache[_cache_key(path)] = (body, content_type, status, now)
+
+
+def _is_safe_proxy_path(path: str) -> bool:
+    """Refuse la traversée de répertoire et les URL absolues dans le proxy."""
+    if "://" in path or path.startswith("//"):
+        return False
+    return ".." not in _cache_key(path).split("/")
 
 
 def _get_bbox_session(bbox_host: str, password: str) -> _req.Session:
@@ -462,8 +575,8 @@ _PROXY_INTERCEPTOR = """
 """
 
 
-def _rewrite_urls(content: str, prefix: str, is_html: bool = False, is_css: bool = False) -> str:
-    bbox_origin = "http://192.168.1.254"
+def _rewrite_urls(content: str, prefix: str, bbox_origin: str,
+                  is_html: bool = False, is_css: bool = False) -> str:
 
     if is_html:
         # Rewrite HTML tag attributes (src=, href=, action=)
@@ -503,15 +616,18 @@ def _rewrite_urls(content: str, prefix: str, is_html: bool = False, is_css: bool
 
 def _proxy_to_bbox(path: str):
     """Shared proxy logic: fetch from Bbox using an authenticated session."""
+    if not _is_safe_proxy_path(path):
+        return Response("Chemin refusé", status=400, content_type="text/plain")
+
     # Serve cacheable assets from in-process cache to avoid hammering the router
-    if request.method == "GET" and any(path.split("?")[0].endswith(ext) for ext in _CACHEABLE_EXT):
-        cache_key = path.split("?")[0]
-        if cache_key in _asset_cache:
-            body, ct, status = _asset_cache[cache_key]
+    if _is_cacheable(path):
+        cached = _cache_get(path)
+        if cached is not None:
+            body, ct, status = cached
             return Response(body, status=status, content_type=ct)
 
-    bbox_host = session.get("bbox_host", "192.168.1.254")
-    bbox_password = session.get("bbox_password", os.getenv("BBOX_PASSWORD", ""))
+    bbox_host = _session_host()
+    bbox_password = _session_password()
     target_url = f"http://{bbox_host}/{path}"
     if request.query_string:
         target_url += "?" + request.query_string.decode()
@@ -527,7 +643,7 @@ def _proxy_to_bbox(path: str):
             data=request.get_data(),
             allow_redirects=True,
             timeout=10,
-            verify=False,
+            verify=config.verify_tls(),
         )
 
     try:
@@ -554,18 +670,17 @@ def _proxy_to_bbox(path: str):
         body_str = upstream.text
         if not is_html:
             body_str = re.sub(r'#\s*sourceMappingURL=\S+', '', body_str)
-        body_str = _rewrite_urls(body_str, "/proxy/bbox", is_html=is_html, is_css=is_css)
+        body_str = _rewrite_urls(body_str, "/proxy/bbox", f"http://{bbox_host}",
+                                 is_html=is_html, is_css=is_css)
         body_bytes = body_str.encode("utf-8", errors="replace")
-        if request.method == "GET" and any(path.split("?")[0].endswith(ext) for ext in _CACHEABLE_EXT):
-            if len(_asset_cache) < _MAX_CACHE_ENTRIES:
-                _asset_cache[path.split("?")[0]] = (body_bytes, content_type, upstream.status_code)
+        if _is_cacheable(path):
+            _cache_put(path, body_bytes, content_type, upstream.status_code)
         return Response(body_bytes, status=upstream.status_code,
                         headers=resp_headers, content_type=content_type)
 
     raw = upstream.content
-    if request.method == "GET" and any(path.split("?")[0].endswith(ext) for ext in _CACHEABLE_EXT):
-        if len(_asset_cache) < _MAX_CACHE_ENTRIES:
-            _asset_cache[path.split("?")[0]] = (raw, content_type, upstream.status_code)
+    if _is_cacheable(path):
+        _cache_put(path, raw, content_type, upstream.status_code)
     return Response(raw, status=upstream.status_code,
                     headers=resp_headers, content_type=content_type)
 
@@ -598,8 +713,8 @@ def bbox_api_proxy(path):
     # Our proxy already holds an authenticated BboxClient session, so we
     # return a fake success so the web app proceeds to make data calls.
     if path == "login" and request.method in ("PUT", "POST"):
-        bbox_host = session.get("bbox_host", "192.168.1.254")
-        bbox_password = session.get("bbox_password", os.getenv("BBOX_PASSWORD", ""))
+        bbox_host = _session_host()
+        bbox_password = _session_password()
         try:
             _get_bbox_session(bbox_host, bbox_password)
             return Response('[{"login":{"state":4}}]', status=200,

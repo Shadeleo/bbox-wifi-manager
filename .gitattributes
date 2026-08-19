@@ -1,0 +1,15 @@
+# Normalise les fins de ligne : LF dans l'index, quel que soit l'OS du contributeur.
+* text=auto eol=lf
+
+# Fichiers binaires : jamais de conversion.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.webp binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.db      binary
+*.sqlite3 binary
